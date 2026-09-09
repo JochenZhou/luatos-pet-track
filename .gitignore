@@ -1,0 +1,10 @@
+# 构建产物 / 部署生成
+index.html
+app.js
+
+# 本地服务
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
