@@ -68,8 +68,10 @@ jobs:
       - name: 重命名 APK
         run: |
           mkdir -p dist
-          APK=$(find android/build -name "*release*.apk" | head -1)
-          cp "$APK" "dist/luatos-pet-track-${{ github.ref_name }}.apk" || cp "$APK" "dist/luatos-pet-track.apk"
+          APK=$(find "$GITHUB_WORKSPACE/build" android/build -name "*.apk" -path "*release*" 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then APK=$(find "$GITHUB_WORKSPACE" -name "*.apk" -path "*release*" 2>/dev/null | head -1); fi
+          echo "APK found: $APK"
+          cp "$APK" "dist/luatos-pet-track.apk"
           ls -la dist/
 
       - name: 上传 APK 产物
