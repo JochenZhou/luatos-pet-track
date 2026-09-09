@@ -59,11 +59,22 @@ jobs:
           key: gradle-${{ hashFiles('android/**/*.gradle') }}
           restore-keys: gradle-
 
-      - name: 构建 Release APK（未签名）
+      - name: 构建 Release APK（固定 keystore 签名，可直接安装/覆盖升级）
         working-directory: android
         run: |
-          chmod +x gradlew || true
-          gradle assembleRelease --no-daemon -x lint
+          gradle assembleRelease --no-daemon -x lint \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/android/keystore/debug.keystore" \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android
+
+      - name: 验证 APK 已签名
+        run: |
+          APK=$(find "$GITHUB_WORKSPACE" -name "*.apk" -path "*release*" 2>/dev/null | head -1)
+          echo "APK: $APK"
+          # apksigner 验证
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK" | head -5
 
       - name: 重命名 APK
         run: |
