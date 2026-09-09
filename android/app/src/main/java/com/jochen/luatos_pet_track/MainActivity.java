@@ -70,10 +70,23 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String host = uri.getHost() == null ? "" : uri.getHost();
-                // 域内（luatos.com 全家桶）继续 WebView；其余（微信支付等场景）走外链
-                if (host.endsWith("luatos.com")) {
-                    return false;
+                String scheme = uri.getScheme() == null ? "" : uri.getScheme();
+                // 白名单：合宙全系（luatos.com / openluat.com，含 iot.openluat.com OAuth）
+                // 全部留在 WebView 内完成登录闭环，绝不甩到系统浏览器
+                boolean inHouse = host.endsWith("luatos.com")
+                        || host.endsWith("openluat.com")
+                        || host.endsWith("d3inf.com");     // 平台 API 网关
+                if (inHouse && ("https".equals(scheme) || "http".equals(scheme))) {
+                    return false; // WebView 自行加载
                 }
+                // 非网页协议（weixin://、intent://、mailto: 等）交给系统处理
+                if (!"http".equals(scheme) && !"https".equals(scheme)) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    } catch (Exception ignored) { }
+                    return true;
+                }
+                // 其它 https 外域也走外链浏览器
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, uri));
                 } catch (Exception ignored) { }
