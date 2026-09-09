@@ -17,6 +17,7 @@
 
   function renderTrack(imei) {
     Views.state.view = 'track';
+    Views.activeNav('track');
     var root = document.getElementById('view-root');
     var devices = Views.state.devices || [];
     root.innerHTML =
@@ -150,6 +151,7 @@
 
   function renderFence() {
     Views.state.view = 'fence';
+    Views.activeNav('fence');
     var root = document.getElementById('view-root');
     root.innerHTML =
       '<div class="home-wrap">' +
@@ -332,6 +334,7 @@
 
   function renderAlerts() {
     Views.state.view = 'alerts';
+    Views.activeNav('alerts');
     var root = document.getElementById('view-root');
     root.innerHTML = '<div class="page"><h2>🚨 越界报警</h2><div id="al-list"></div></div>';
     Views.clearTimers();
@@ -360,6 +363,7 @@
 
   function renderStatus(imei) {
     Views.state.view = 'status';
+    Views.activeNav('status');
     var root = document.getElementById('view-root');
     var devices = Views.state.devices || [];
     root.innerHTML =
@@ -435,6 +439,7 @@
 
   function renderDebug() {
     Views.state.view = 'debug';
+    Views.activeNav('debug');
     var root = document.getElementById('view-root');
     root.innerHTML = '<div class="page"><h2>🔧 性能监控</h2><div id="db-body"></div></div>';
     Views.clearTimers();

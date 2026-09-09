@@ -42,6 +42,10 @@
   ];
   // 默认设备状态轮询 tag 集
   var DEFAULT_STATUS_TAGS = [513, 512, 799, 782, 519, 256];
+
+  // ============ 电量分档（vbat 电压 mV）：低电量阈值 ============
+  var VBAT_LOW_MV = 3400;   // < 3400mV 判定低电量（红）
+  var VBAT_MID_MV = 3700;   // < 3700mV 判定中等电量（黄），≥3700 充足（绿）
   // 轨迹查询 tag 集（附 1294 精细点）
   var TRACK_TAGS = [513, 512, 1294];
 
@@ -74,6 +78,8 @@
   var REQ_TIMEOUT = 15000;       // fetch 15s 超时
   var POLL_STATUS_MS = 10000;    // 首页状态轮询间隔
   var FENCE_ALERT_DEBOUNCE = 300000; // 围栏报警 5 分钟去抖
+  var STATUS_TTL_MS = 30000;     // 设备状态缓存有效期（切 tab 内复用，过期后台刷新）
+  var DEVICES_TTL_MS = 60000;    // 设备列表缓存有效期
 
   // 设备名称云同步 cls（common/put）与 uni_key 说明
   var DEVNAME_CLS = 10;
@@ -93,6 +99,8 @@
     FALLBACK_APP_ID: FALLBACK_APP_ID,
     TAG_LIST: TAG_LIST,
     DEFAULT_STATUS_TAGS: DEFAULT_STATUS_TAGS,
+    VBAT_LOW_MV: VBAT_LOW_MV,
+    VBAT_MID_MV: VBAT_MID_MV,
     TRACK_TAGS: TRACK_TAGS,
     PRIVATE_TAGS: PRIVATE_TAGS,
     KEY_MY_AUTH: KEY_MY_AUTH,
@@ -116,6 +124,8 @@
     REQ_TIMEOUT: REQ_TIMEOUT,
     POLL_STATUS_MS: POLL_STATUS_MS,
     FENCE_ALERT_DEBOUNCE: FENCE_ALERT_DEBOUNCE,
+    STATUS_TTL_MS: STATUS_TTL_MS,
+    DEVICES_TTL_MS: DEVICES_TTL_MS,
     DEVNAME_CLS: DEVNAME_CLS,
     COORD_GCJ02: COORD_GCJ02,
     COORD_WGS84: COORD_WGS84,

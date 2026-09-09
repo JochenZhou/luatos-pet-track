@@ -17,6 +17,8 @@
     projects: [],
     devices: [],       // [{deviceid}]
     statuses: {},      // imei -> status
+    statusCache: {},   // imei -> { st, t } 设备状态缓存（切 tab 复用，避免闪烁/重复请求）
+    devicesCache: { list: null, t: 0 }, // 设备列表缓存
     timers: [],        // 本页定时器
     view: ''
   };
@@ -102,6 +104,17 @@
     U.$all('[data-route]').forEach(function (a) {
       a.classList.toggle('active', a.getAttribute('data-route') === view);
     });
+    updateAlertDot();
+  }
+
+  /**
+   * 报警 Tab 呼吸灯红点：存在围栏报警记录时，给「报警」入口加红色呼吸闪烁
+   */
+  function updateAlertDot() {
+    var has = FenceStore.alerts().length > 0;
+    U.$all('[data-route="alerts"]').forEach(function (a) {
+      a.classList.toggle('has-alert', has);
+    });
   }
 
   function showLoading(msg) {
@@ -149,12 +162,18 @@
     sel.style.display = list.length > 1 ? '' : 'none';
   }
 
-  function loadDevices() {
+  function loadDevices(force) {
+    // 设备列表缓存：切 tab 复用，TTL 内不重复请求（force 强制刷新）
+    if (!force && state.devicesCache.list && (Date.now() - state.devicesCache.t < CFG.DEVICES_TTL_MS)) {
+      state.devices = state.devicesCache.list;
+      return Promise.resolve(state.devices);
+    }
     return ensureProject().then(function (key) {
       if (!key) return [];
       return AC.searchMyDevices(key, '', 1, CFG.LIST_MAX_SIZE).then(function (res) {
         if (res.code !== 0) return [];
         var records = (res.value && res.value.records) || [];
+        state.devicesCache = { list: records, t: Date.now() };
         state.devices = records;
         return records;
       });
@@ -162,22 +181,36 @@
   }
 
   /**
-   * 并发获取全部设备状态（流式渲染：每台设备获取完成立即回调，不等全部）
-   * onOne(imei, status) 单台完成；onAll(out) 全部完成
+   * 并发获取全部设备状态（流式渲染 + 状态缓存）
+   * - 先用缓存快照 onAll(out) 立即渲染（切 tab 不闪烁、不空白）
+   * - 仅过期/无缓存设备才请求；force=true 时全部刷新（页面内轮询用）
+   * - onOne(imei, status) 单台完成；onAll(out) 缓存快照与全部完成各回调一次
    */
-  function fetchAllStatuses(devices, onOne, onAll) {
+  function fetchAllStatuses(devices, onOne, onAll, force) {
     var imeis = (devices || []).map(function (d) { return d.deviceid; }).filter(Boolean);
+    var now = Date.now();
     var out = {};
-    var remain = imeis.length;
-    if (!remain) { onAll && onAll(out); return; }
+    var toFetch = [];
     imeis.forEach(function (imei) {
+      var c = state.statusCache[imei];
+      var fresh = !force && c && (now - c.t < CFG.STATUS_TTL_MS);
+      if (c) out[imei] = c.st;      // 有缓存先占位（新鲜 or 过期都用，避免闪烁）
+      if (!fresh) toFetch.push(imei);
+    });
+    // 先渲染缓存快照（消除「有数据→无数据」跳变）
+    if (onAll) onAll(out);
+    if (!toFetch.length) return;
+    var remain = toFetch.length;
+    toFetch.forEach(function (imei) {
       AC.getPetStatus(imei).then(function (st) {
-        out[imei] = st;
         var p = PetStore.getOrCreate(imei);
         st.name = p.name;
+        out[imei] = st;
+        state.statusCache[imei] = { st: st, t: Date.now() };
         onOne && onOne(imei, st);
       })['catch'](function () {
         out[imei] = { imei: imei, found: false, name: PetStore.nameOf(imei) };
+        state.statusCache[imei] = { st: out[imei], t: Date.now() };
       })['then'](function () {
         remain--;
         if (remain <= 0) onAll && onAll(out);
@@ -208,27 +241,32 @@
           document.getElementById('home-cards').innerHTML = '<div class="empty-card">暂无设备</div>';
           return;
         }
-        // 立即先渲染骨架卡片（占位），数据流式到达逐台更新
-        state.statuses = {};
-        renderHomeCards(devices, {});
-        function refresh() {
+        function refresh(force) {
           fetchAllStatuses(devices,
             function (imei, st) {           // 单台完成：立即上屏
               state.statuses[imei] = st;
               renderHomeCards(devices, state.statuses);
               MapKit.upsertMarker(st);
             },
-            function (statuses) {           // 全部完成
+            function (statuses) {           // 缓存快照 / 全部完成
               state.statuses = statuses;
               renderHomeCards(devices, statuses);
               MapKit.refreshOpenPopups();
-            });
+            },
+            force);
         }
-        refresh();
-        every(refresh, CFG.POLL_STATUS_MS);
+        refresh(false);
+        every(function () { refresh(true); }, CFG.POLL_STATUS_MS);
       });
     });
     bindTurboStop();
+  }
+
+  /**
+   * 低电量判定：vbat 有值且 < 3400mV
+   */
+  function isLowBattery(st) {
+    return !!(st && st.vbat !== undefined && st.vbat !== null && Number(st.vbat) > 0 && Number(st.vbat) < CFG.VBAT_LOW_MV);
   }
 
   function renderHomeCards(devices, statuses) {
@@ -245,12 +283,14 @@
       var bat = (st.vbatPct !== undefined && st.vbatPct !== null) ? st.vbatPct + '%' : '--';
       var sig = st.signal !== undefined && st.signal !== null ? (st.signal + ' ' + U.signalText(st.signal)) : '--';
       var upTime = st.ts ? U.timeAgo(st.ts) : '--';
-      return '<div class="pet-card" data-imei="' + U.esc(imei) + '" data-zoom="15">' +
-        '<div class="pc-head"><b>' + U.esc(st.name) + '</b>' + badge + '</div>' +
+      var low = isLowBattery(st);
+      var lowBadge = low ? '<span class="badge bad-low">低电量</span>' : '';
+      return '<div class="pet-card' + (low ? ' pc-low' : '') + '" data-imei="' + U.esc(imei) + '" data-zoom="15">' +
+        '<div class="pc-head"><b>' + U.esc(st.name) + '</b><span class="pc-badges">' + lowBadge + badge + '</span></div>' +
         '<div class="pc-sub">' + U.esc(imei) + '</div>' +
         '<div class="pc-row">📍 ' + U.esc(loc) + '</div>' +
         '<div class="pc-row pc-addr">🏷 ' + addr + '</div>' +
-        '<div class="pc-foot">🔋 ' + U.esc(bat) + ' · 📶 ' + U.esc(sig) + ' · 🕒 ' + U.esc(upTime) + '</div>' +
+        '<div class="pc-foot">🔋 ' + U.esc(bat) + (low ? ('（' + Number(st.vbat) + 'mV）') : '') + ' · 📶 ' + U.esc(sig) + ' · 🕒 ' + U.esc(upTime) + '</div>' +
         '</div>';
     }).join('');
     box.innerHTML = html;
@@ -344,11 +384,13 @@
           root.querySelector('.pet-grid').innerHTML = '<div class="empty">暂无设备，扫码绑定后自动出现</div>';
           return;
         }
-        // 骨架卡片立即上屏
-        renderPetGrid(devices, {});
-        fetchAllStatuses(devices,
-          function (imei, st) { renderPetGrid(devices, (state.statuses[imei] = st, state.statuses)); },
-          function (statuses) { state.statuses = statuses; renderPetGrid(devices, statuses); });
+        function refresh(force) {
+          fetchAllStatuses(devices,
+            function (imei, st) { renderPetGrid(devices, (state.statuses[imei] = st, state.statuses)); },
+            function (statuses) { state.statuses = statuses; renderPetGrid(devices, statuses); },
+            force);
+        }
+        refresh(false);
       });
     })['catch'](function () { /* ignore */ });
   }
@@ -378,6 +420,24 @@
     } catch (e) { done(false); }
   }
 
+  /**
+   * 电池图标（颜色随电量档位：低红 / 中黄 / 高绿；填充宽度随百分比）
+   */
+  function batteryHtml(st) {
+    var mv = st && st.vbat;
+    var pct = st && st.vbatPct;
+    var hasMv = mv !== undefined && mv !== null && Number(mv) > 0;
+    var hasPct = pct !== undefined && pct !== null;
+    if (!hasMv && !hasPct) return '<span class="bat bat-none"><i class="bat-ic"></i><b>--</b></span>';
+    var tone = U.batteryTone(mv);
+    var fill = hasPct ? Math.max(0, Math.min(100, pct)) : 0;
+    var label = hasPct ? (pct + '%') : (Number(mv) + 'mV');
+    var title = hasMv ? (Number(mv) + 'mV') : '';
+    return '<span class="bat bat-' + tone + '"' + (title ? ' title="' + title + '"' : '') + '>' +
+      '<i class="bat-ic"><i class="bat-fill" style="width:' + fill + '%"></i></i>' +
+      '<b>' + U.esc(label) + '</b></span>';
+  }
+
   function renderPetGrid(devices, statuses) {
     var grid = document.getElementById('pet-grid');
     if (!grid) return;
@@ -390,8 +450,6 @@
       var offline = st.ts ? (Date.now() - st.ts > 5 * 60 * 1000) : !st.found;
       var badge = hasData ? (st.found ? (offline ? '<span class="badge bad-off">离线</span>' : '<span class="badge bad-on">在线</span>') : '<span class="badge bad-off">无定位</span>') : '<span class="badge bad-load">加载中…</span>';
       var last = st.ts ? U.timeAgo(st.ts) : '--';
-      var bat = (st.vbatPct !== undefined && st.vbatPct !== null) ? st.vbatPct + '%' : '--';
-      var batMv = st.vbat ? ('（' + st.vbat + 'mV）') : '';
       var sig = (st.signal !== undefined && st.signal !== null) ? (st.signal + ' ' + U.signalText(st.signal)) : '--';
       var sat = (st.sat !== undefined && st.sat !== null) ? (st.sat + ' 颗') : '--';
       var spd = (st.speedKmh !== undefined && st.speedKmh !== null) ? (st.speedKmh + ' km/h') : '--';
@@ -400,10 +458,10 @@
       return '<div class="pcard" data-imei="' + U.esc(imei) + '">' +
         '<div class="pcard-head"><b>' + U.esc(name) + '</b>' + badge + '</div>' +
         '<div class="pcard-sub">' + U.esc(imei) + '<button class="btn-copy" data-act="copy" title="复制 IMEI">📋 复制</button></div>' +
-        '<div class="pcard-row">📍 ' + (st.address ? U.esc(st.address) : (hasData ? '暂无位置' : '…')) + '</div>' +
+        '<div class="pcard-row"' + (st.address ? ' title="' + U.esc(st.address) + '"' : '') + '>📍 ' + (st.address ? U.esc(st.address) : (hasData ? '暂无位置' : '…')) + '</div>' +
         (st.lng !== undefined && isFinite(st.lng) ? '<div class="pcard-row pc-loc">' + Number(st.lng).toFixed(6) + ', ' + Number(st.lat).toFixed(6) + '</div>' : '') +
         '<div class="pcard-kv">' +
-        '  <span>🔋 电量 <b>' + U.esc(bat + batMv) + '</b></span>' +
+        '  <span>🔋 电量 ' + batteryHtml(st) + '</span>' +
         '  <span>📶 信号 <b>' + U.esc(sig) + '</b></span>' +
         '  <span>🛰 卫星 <b>' + U.esc(sat) + '</b></span>' +
         '  <span>💨 速度 <b>' + U.esc(spd) + '</b></span>' +
@@ -599,6 +657,8 @@
     hideLoading: hideLoading,
     buildShell: buildShell,
     modal: modal,
+    activeNav: activeNav,
+    updateAlertDot: updateAlertDot,
     renderHome: renderHome,
     renderPets: renderPets,
     renderDevices: renderDevices,

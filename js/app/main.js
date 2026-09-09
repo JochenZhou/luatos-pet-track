@@ -71,7 +71,10 @@
           var inside = FenceStore.isPointInFence([lng, lat], f);
           if (!inside) {
             var alert = FenceStore.addAlert(imei, f.id, [lng, lat], res.value.address);
-            if (alert) U.toast('�� 「' + f.name + '」设备 ' + PetStore.nameOf(imei) + ' 越界！');
+            if (alert) {
+              U.toast('�� 「' + f.name + '」设备 ' + PetStore.nameOf(imei) + ' 越界！');
+              Views.updateAlertDot();
+            }
           }
         });
       });

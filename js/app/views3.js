@@ -60,7 +60,9 @@
       hours[hr] += 1;
       prev = { lng: c[0], lat: c[1], ts: p.ts };
     });
-    return { total: total, maxSeg: maxSeg, first: first, last: last, hours: hours };
+    var durationMs = (first && last && last.ts > first.ts) ? (last.ts - first.ts) : 0;
+    var avgKmh = (durationMs > 60000 && total > 0) ? Math.round(total * 3600 / durationMs * 100) / 100 : null;
+    return { total: total, maxSeg: maxSeg, first: first, last: last, hours: hours, durationMs: durationMs, avgKmh: avgKmh };
   }
 
   /**
@@ -114,6 +116,7 @@
 
   function renderReport(imeiArg) {
     Views.state.view = 'report';
+    Views.activeNav('report');
     var root = document.getElementById('view-root');
     var devices = Views.state.devices || [];
     root.innerHTML =
@@ -162,28 +165,34 @@
     var dayStart = date + ' 00:00:00';
     var dayEnd = date + ' 23:59:59';
     var filter = { aks: ['ct', 'ct'], acs: ['ge', 'le'], avs: [dayStart, dayEnd] };
+    // 近 7 天起点（用于连续打卡统计，真实上报判定）
+    var base = U.parseLocalTime(date + ' 00:00:00');
+    var streakStart = base ? (dateStr(new Date(base.getTime() - 6 * 86400000)) + ' 00:00:00') : dayStart;
 
-    // 三路数据并行：轨迹 / 传感+电量 / 最新位置
+    // 三路数据并行：轨迹 / 传感+电量 / 最新位置 / 近7天轨迹（连续打卡）
     Promise.all([
       AC.getTrack(imei, dayStart, dayEnd, {}),
       AC.fetchAllByTags(imei, [799, 782, 1293, 517, 256, 519], filter, {}),
-      AC.latestLocation(imei)
+      AC.latestLocation(imei),
+      AC.getTrack(imei, streakStart, dayEnd, {})
     ]).then(function (results) {
       if (!box.isConnected) return; // 页面已切换
       var trackPts = results[0] || [];
       var recs = results[1] || [];
       var latest = (results[2].code === 0 && results[2].value) ? results[2].value : null;
+      var weekPts = results[3] || [];
 
       var ts1 = trackStats(trackPts);
       var bat = batteryStats(recs);
       var online = onlineStats(recs, U.parseLocalTime(dayStart).getTime(), U.parseLocalTime(dayEnd).getTime());
 
       // 步数：当日 1293 解包（可能数据量大，限制最近 60 条记录）
-      var steps = null;
+      var steps = null, cadence = null;
       var gsRecs = recs.filter(function (r) { return AC.recVal(r, 1293) !== undefined; });
       if (gsRecs.length) {
         var analysis = PetStatus.analyze(gsRecs.slice(0, 60), {});
         steps = analysis.steps;
+        cadence = analysis.cadence || null;
       }
 
       // 温度
@@ -200,13 +209,23 @@
         distance: ts1.total,
         trackCount: trackPts.length,
         first: ts1.first, last: ts1.last,
+        durationMs: ts1.durationMs,
+        avgKmh: ts1.avgKmh,
         hours: ts1.hours,
         steps: steps,
+        cadence: cadence,
         temp: temp,
         bat: bat,
         online: online,
         latest: latest
       };
+      // 情绪价值字段：基于真实数据计算
+      var peak = peakStats(ts1.hours);
+      model.peakLabel = peak.label;
+      model.streak = calcStreak(weekPts, date);
+      model.badges = calcBadges(model);
+      model.summary = moodSummary(model);
+      model.funLines = buildFunLines(model);
       currentModel = model;
       renderCard(model);
     })['catch'](function () {
@@ -220,6 +239,116 @@
     if (m === null || m === undefined || !isFinite(m)) return '--';
     if (m < 1000) return Math.round(m) + ' m';
     return (m / 1000).toFixed(2) + ' km';
+  }
+
+  function fmtDuration(ms) {
+    if (!ms || ms <= 0) return '--';
+    var m = Math.round(ms / 60000);
+    if (m < 60) return m + ' 分钟';
+    var h = Math.floor(m / 60), mm = m % 60;
+    return h + ' 小时' + (mm ? ' ' + mm + ' 分' : '');
+  }
+
+  function fmtSpeed(kmh) {
+    if (kmh === null || kmh === undefined || !isFinite(kmh)) return '--';
+    return kmh + ' km/h';
+  }
+
+  // ============ 情绪价值：拟人总结 / 趣味换算 / 连续打卡 / 徽章 ============
+
+  function dateStr(d) {
+    return d.getFullYear() + '-' + U.two(d.getMonth() + 1) + '-' + U.two(d.getDate());
+  }
+
+  function periodLabel(h) {
+    if (h >= 5 && h < 8) return '清晨';
+    if (h >= 8 && h < 11) return '上午';
+    if (h >= 11 && h < 13) return '中午';
+    if (h >= 13 && h < 17) return '下午';
+    if (h >= 17 && h < 20) return '傍晚';
+    if (h >= 20 && h < 23) return '晚上';
+    return '深夜';
+  }
+
+  function peakStats(hours) {
+    var max = 0, idx = -1;
+    for (var i = 0; i < 24; i++) { if (hours[i] > max) { max = hours[i]; idx = i; } }
+    if (idx < 0) return { hour: null, label: null };
+    return { hour: idx, label: periodLabel(idx) };
+  }
+
+  /** 口吻化总结：基于真实数据，只拟人语气，不造数 */
+  function moodSummary(model) {
+    var s;
+    if (model.distance !== null && model.distance > 0) {
+      s = model.distance >= 1000 ? '今天撒欢走了 ' + (model.distance / 1000).toFixed(2) + ' 公里' : '今天活动了 ' + Math.round(model.distance) + ' 米';
+    } else {
+      s = '今天比较宅，几乎没出门';
+    }
+    if (model.steps !== null && model.steps > 0) s += '，走了 ' + model.steps + ' 步';
+    if (model.peakLabel) s += '，' + model.peakLabel + '最活跃';
+    return s + ' 🐾';
+  }
+
+  function funDistance(m) {
+    if (!m || m <= 0) return '';
+    var laps = m / 400;
+    return '≈ 绕标准操场 ' + (laps < 1 ? laps.toFixed(2) : laps.toFixed(1)) + ' 圈';
+  }
+
+  function funSteps(steps) {
+    if (!steps || steps <= 0) return '';
+    return '≈ 追 ' + Math.max(1, Math.round(steps / 50)) + ' 次飞盘的能量';
+  }
+
+  function funBattery(bat) {
+    if (!bat || bat.perHour === null || bat.perHour === undefined || bat.perHour <= 0) return '';
+    var remain = (bat.lastMv || 0) - 3400;
+    if (remain <= 0) return '电量紧张，快给它充电啦 ⚡';
+    var h = remain / bat.perHour;
+    return '≈ 还能陪你浪 ' + (Math.round(h * 10) / 10) + ' 小时';
+  }
+
+  function buildFunLines(model) {
+    var lines = [];
+    var d = funDistance(model.distance), s = funSteps(model.steps), b = funBattery(model.bat);
+    if (d) lines.push(d);
+    if (s) lines.push(s);
+    if (b) lines.push(b);
+    return lines;
+  }
+
+  function calcBadges(model) {
+    var badges = [];
+    if (model.steps !== null && model.steps !== undefined) {
+      if (model.steps >= 5000) badges.push('👑 步数大神');
+      else if (model.steps >= 1000) badges.push('🏆 千步勇士');
+      else if (model.steps >= 100) badges.push('🐾 起步小将');
+    }
+    if (model.distance !== null && model.distance >= 500) {
+      badges.push(model.distance >= 2000 ? '🏃 远足达人' : '🚶 遛弯达标');
+    }
+    if (model.online && model.online.hoursCovered >= 8) badges.push('📡 全天候在线');
+    if (model.bat && model.bat.charging) badges.push('🔋 正在充电');
+    return badges;
+  }
+
+  /** 连续打卡：近 N 天每天是否有轨迹点（真实上报），从所选日期往前数连续天数 */
+  function calcStreak(points, date) {
+    var daySet = {};
+    (points || []).forEach(function (p) {
+      if (!p.ts) return;
+      daySet[dateStr(new Date(p.ts))] = true;
+    });
+    var base = U.parseLocalTime(date + ' 00:00:00');
+    if (!base) return 0;
+    var cur = new Date(base.getTime());
+    var streak = 0;
+    for (var i = 0; i < 14; i++) {
+      if (daySet[dateStr(cur)]) { streak++; cur.setDate(cur.getDate() - 1); }
+      else break;
+    }
+    return streak;
   }
 
   function renderCard(model) {
@@ -245,15 +374,30 @@
       '  <div class="rc-hero">' +
       '    <div class="rc-big">' + fmtDist(model.distance) + '</div>' +
       '    <div class="rc-big-label">今日移动距离</div>' +
+      '    <div class="rc-summary">' + U.esc(model.summary) + '</div>' +
+      (model.funLines && model.funLines.length ?
+        '    <div class="rc-fun">' + model.funLines.map(function (l) { return '<span>' + U.esc(l) + '</span>'; }).join('') + '</div>' : '') +
       '  </div>' +
       '  <div class="rc-grid">' +
       '    <div class="rc-item"><span>🚶 步数</span><b>' + (model.steps !== null ? model.steps : '--') + '</b></div>' +
+      '    <div class="rc-item"><span>⚡ 步频</span><b>' + (model.cadence != null ? (Math.round(model.cadence) + ' 步/分') : '--') + '</b></div>' +
+      '    <div class="rc-item"><span>🏃 均速</span><b>' + fmtSpeed(model.avgKmh) + '</b></div>' +
       '    <div class="rc-item"><span>📍 轨迹点</span><b>' + model.trackCount + '</b></div>' +
       '    <div class="rc-item"><span>🔋 电量</span><b>' + U.esc(batLine) + '</b></div>' +
       '    <div class="rc-item"><span>⚡ 耗速</span><b>' + (model.bat && model.bat.perHour !== null ? model.bat.perHour + ' mV/h' : '--') + '</b></div>' +
       '    <div class="rc-item"><span>📶 在线覆盖</span><b>' + onlinePct + '%</b></div>' +
       '    <div class="rc-item"><span>🌡 温度</span><b>' + (model.temp !== null ? model.temp + ' ℃' : '--') + '</b></div>' +
       '  </div>' +
+      '  <div class="rc-meta">' +
+      '    <span>⏱ 活跃时长 ' + fmtDuration(model.durationMs) + '</span>' +
+      '    <span>📡 上报 ' + model.online.reports + ' 次</span>' +
+      (model.bat && model.bat.charging ? '<span class="rc-charging">⚡ 充电中</span>' : '') +
+      '  </div>' +
+      ((model.streak > 0 || (model.badges && model.badges.length)) ?
+        '  <div class="rc-achieve">' +
+        (model.streak > 0 ? '<span class="rc-streak">🔥 连续打卡 ' + model.streak + ' 天</span>' : '') +
+        (model.badges || []).map(function (b) { return '<span class="rc-badge">' + U.esc(b) + '</span>'; }).join('') +
+        '  </div>' : '') +
       '  <canvas id="rp-hours" width="640" height="120"></canvas>' +
       '  <div class="rc-foot">📍 位置：' + (model.latest && model.latest.address ? U.esc(model.latest.address) : '--') + '</div>' +
       '</div>' +
@@ -274,35 +418,38 @@
     if (!cv) return;
     var ctx = cv.getContext('2d');
     var W = cv.width, H = cv.height;
-    var pad = 30;
-    var max = Math.max.apply(null, hours) || 1;
+    var padL = 30, padR = 12, padTop = 42, padBottom = 28;
     ctx.clearRect(0, 0, W, H);
     // 底色
     ctx.fillStyle = '#f4f6fb';
     ctx.fillRect(0, 0, W, H);
-    // 柱
-    var bw = (W - pad * 2) / 24;
+    // 标题（独立顶部，不侵入绘图区）
+    ctx.fillStyle = '#1f2937';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('活跃时段（上报点分布）', padL, 22);
+    // 绘图区（标题下方，与标题留白，避免重叠）
+    var chartBottom = H - padBottom;
+    var chartTop = padTop;
+    var chartH = chartBottom - chartTop;
+    var max = Math.max.apply(null, hours) || 1;
+    var bw = (W - padL - padR) / 24;
     for (var h = 0; h < 24; h++) {
-      var bh = hours[h] / max * (H - 42);
+      var bh = hours[h] / max * chartH;
       if (hours[h] > 0) {
         ctx.fillStyle = '#2f7bff';
         ctx.globalAlpha = 0.35 + 0.65 * (hours[h] / max);
-        ctx.fillRect(pad + h * bw + 2, H - 26 - bh, bw - 4, bh);
+        ctx.fillRect(padL + h * bw + 2, chartBottom - bh, bw - 4, bh);
         ctx.globalAlpha = 1;
       }
       // 刻度（每 6 小时）
       if (h % 6 === 0) {
         ctx.fillStyle = '#8a94a6';
-        ctx.font = '16px sans-serif';
+        ctx.font = '13px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(h + '时', pad + h * bw + bw / 2, H - 8);
+        ctx.fillText(h + '时', padL + h * bw + bw / 2, chartBottom + 16);
       }
     }
-    // 标题
-    ctx.fillStyle = '#1f2937';
-    ctx.font = 'bold 18px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('活跃时段（上报点分布）', pad, 22);
   }
 
   function bindCardActions(model) {
@@ -319,7 +466,7 @@
         off.width = W * scale;
         var ctx = off.getContext('2d');
         // 预排版高度
-        var topH = 150, devH = 60, heroH = 150, gridH = 170, hoursH = 140, footH = 60, pad = 24;
+        var topH = 150, devH = 60, heroH = 240, gridH = 170, hoursH = 140, footH = 60, pad = 24;
         var totalH = topH + devH + heroH + gridH + hoursH + footH + pad * 2;
         off.height = totalH * scale;
         ctx.scale(scale, scale);
@@ -343,35 +490,52 @@
         ctx.globalAlpha = 0.85;
         ctx.fillText(model.imei, pad, 140);
         ctx.globalAlpha = 1;
-        var y = topH + pad;
-        // 设备行
-        ctx.fillStyle = '#1f2937';
-        ctx.font = '18px sans-serif';
-        y = topH + 8; // 设备名已在头部
+        var y = topH + 16;
         // Hero 距离
-        y = topH + 20;
         ctx.fillStyle = '#2f7bff';
         ctx.font = 'bold 64px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(fmtDist(model.distance), W / 2, y + 80);
+        ctx.fillText(fmtDist(model.distance), W / 2, y + 64);
         ctx.fillStyle = '#8a94a6';
         ctx.font = '20px sans-serif';
-        ctx.fillText('今日移动距离', W / 2, y + 112);
+        ctx.fillText('今日移动距离', W / 2, y + 94);
+        // 口吻总结
+        ctx.fillStyle = '#1f2937';
+        ctx.font = '18px sans-serif';
+        ctx.fillText(model.summary, W / 2, y + 126);
+        // 趣味换算
+        var funText = (model.funLines || []).join(' · ');
+        if (funText) {
+          ctx.fillStyle = '#8a94a6';
+          ctx.font = '15px sans-serif';
+          ctx.fillText(funText, W / 2, y + 152);
+        }
+        // 连续打卡 + 徽章
+        var achParts = [];
+        if (model.streak > 0) achParts.push('🔥 连续打卡 ' + model.streak + ' 天');
+        achParts = achParts.concat(model.badges || []);
+        if (achParts.length) {
+          ctx.fillStyle = '#e67e22';
+          ctx.font = '16px sans-serif';
+          ctx.fillText(achParts.join('  '), W / 2, y + 184);
+        }
         ctx.textAlign = 'left';
         // 六宫格
         y = topH + heroH;
         var items = [
           ['🚶 步数', model.steps !== null ? String(model.steps) : '--'],
+          ['⚡ 步频', model.cadence != null ? Math.round(model.cadence) + ' 步/分' : '--'],
+          ['🏃 均速', model.avgKmh != null ? model.avgKmh + ' km/h' : '--'],
           ['📍 轨迹点', String(model.trackCount)],
           ['🔋 电量', model.bat ? (model.bat.pctFirst !== null && model.bat.pctLast !== null ? model.bat.pctFirst + '%→' + model.bat.pctLast + '%' : '--') : '--'],
           ['⚡ 耗速', model.bat && model.bat.perHour !== null ? model.bat.perHour + ' mV/h' : '--'],
           ['📶 在线', model.online.reports > 0 ? Math.min(100, Math.round(model.online.hoursCovered / 24 * 100)) + '%' : '0%'],
           ['🌡 温度', model.temp !== null ? model.temp + '℃' : '--']
         ];
-        var gw = (W - pad * 2) / 3, gh = (gridH - 20) / 2;
+        var gw = (W - pad * 2) / 4, gh = (gridH - 20) / 2;
         items.forEach(function (it, idx) {
-          var gx = pad + (idx % 3) * gw;
-          var gy = y + Math.floor(idx / 3) * gh;
+          var gx = pad + (idx % 4) * gw;
+          var gy = y + Math.floor(idx / 4) * gh;
           ctx.fillStyle = '#f4f6fb';
           ctx.fillRect(gx + 4, gy + 4, gw - 8, gh - 8);
           ctx.fillStyle = '#8a94a6';
@@ -384,15 +548,18 @@
         // 活跃时段（把已画的 canvas 拷贝进来）
         y = topH + heroH + gridH;
         ctx.drawImage(hoursCv, 0, y, W, hoursH - 10);
-        // 页脚
+        // 页脚（位置 + 活跃时长/上报/充电 + 来源）
         y = topH + heroH + gridH + hoursH;
         ctx.fillStyle = '#8a94a6';
         ctx.font = '15px sans-serif';
         var addr = model.latest && model.latest.address ? model.latest.address : '--';
         if (addr.length > 34) addr = addr.slice(0, 33) + '…';
-        ctx.fillText('📍 ' + addr, pad, y + 24);
+        ctx.fillText('📍 ' + addr, pad, y + 16);
+        var metaLine = '⏱ 活跃 ' + fmtDuration(model.durationMs) + ' · 📡 上报 ' + model.online.reports + ' 次';
+        if (model.bat && model.bat.charging) metaLine += ' · ⚡ 充电中';
+        ctx.fillText(metaLine, pad, y + 40);
         ctx.textAlign = 'right';
-        ctx.fillText('AirCloud · 真实数据', W - pad, y + 24);
+        ctx.fillText('AirCloud · 真实数据', W - pad, y + 40);
         ctx.textAlign = 'left';
 
         // 导出：优先下载；Webview 不支持时提示长按
@@ -426,11 +593,17 @@
         var m = model;
         var lines = [
           '📋 ' + m.date + ' 日报 · ' + m.name,
-          '🚶 步数：' + (m.steps !== null ? m.steps : '--'),
-          '🏃 移动：' + fmtDist(m.distance) + '（' + m.trackCount + ' 个轨迹点）',
-          '🔋 电量：' + (m.bat ? (m.bat.pctFirst !== null && m.bat.pctLast !== null ? m.bat.pctFirst + '% → ' + m.bat.pctLast + '%' : m.bat.firstMv + '→' + m.bat.lastMv + 'mV') : '--'),
-          '📶 在线覆盖：' + (m.online.reports > 0 ? Math.min(100, Math.round(m.online.hoursCovered / 24 * 100)) + '%' : '0%')
+          '🐾 ' + m.summary
         ];
+        if (m.streak > 0) lines.push('🔥 连续打卡 ' + m.streak + ' 天');
+        if (m.badges && m.badges.length) lines.push('🎖 ' + m.badges.join(' · '));
+        lines.push('🏃 移动：' + fmtDist(m.distance) + '（' + m.trackCount + ' 个轨迹点）');
+        lines.push('🚶 步数：' + (m.steps !== null ? m.steps : '--') + (m.cadence != null ? ' · 步频 ' + Math.round(m.cadence) + ' 步/分' : ''));
+        lines.push('🏃 均速：' + fmtSpeed(m.avgKmh) + ' · ⏱ 活跃 ' + fmtDuration(m.durationMs));
+        lines.push('🔋 电量：' + (m.bat ? (m.bat.pctFirst !== null && m.bat.pctLast !== null ? m.bat.pctFirst + '% → ' + m.bat.pctLast + '%' : m.bat.firstMv + '→' + m.bat.lastMv + 'mV') : '--') + (m.bat && m.bat.charging ? '（充电中）' : ''));
+        lines.push('⚡ 耗速：' + (m.bat && m.bat.perHour !== null ? m.bat.perHour + ' mV/h' : '--'));
+        lines.push('📶 在线覆盖：' + (m.online.reports > 0 ? Math.min(100, Math.round(m.online.hoursCovered / 24 * 100)) + '%' : '0%'));
+        lines.push('🌡 温度：' + (m.temp !== null ? m.temp + '℃' : '--'));
         var text = lines.join('\n');
         function done(ok) { U.toast(ok ? '✅ 已复制，去粘贴分享吧' : '复制失败', ok ? '' : 'err'); }
         function copyNow() {

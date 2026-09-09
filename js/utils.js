@@ -163,6 +163,20 @@
   }
 
   /**
+   * 电量档位：按 vbat(mV) 返回 low/mid/high/none（用于电池图标着色）
+   * low  < 3400mV（低电量）；mid < 3700mV；high ≥3700mV
+   */
+  function batteryTone(mv) {
+    var v = Number(mv);
+    if (!isFinite(v) || v <= 0) return 'none';
+    var LOW = 3400, HIGH = 3700;
+    try { LOW = global.CFG.VBAT_LOW_MV; HIGH = global.CFG.VBAT_MID_MV; } catch (e) { /* ignore */ }
+    if (v < LOW) return 'low';
+    if (v < HIGH) return 'mid';
+    return 'high';
+  }
+
+  /**
    * 782 4G 信号分档
    */
   function signalText(v) {
@@ -304,6 +318,7 @@
     fmtLiteral: fmtLiteral,
     timeAgo: timeAgo,
     vbatToPercent: vbatToPercent,
+    batteryTone: batteryTone,
     signalText: signalText,
     maskPhone: maskPhone,
     debounce: debounce,
