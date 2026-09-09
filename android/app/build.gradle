@@ -35,4 +35,13 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.webkit:webkit:1.11.0'
+    // 修复 kotlin-stdlib 与 jdk7/jdk8 传递依赖的重复类冲突（统一 1.8.22）
+    constraints {
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22') {
+            because 'align kotlin stdlib versions'
+        }
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22') {
+            because 'align kotlin stdlib versions'
+        }
+    }
 }
