@@ -51,6 +51,7 @@
     '<nav class="nav-pc">' +
     '  <a href="#/home" data-route="home">📍 实时地图</a>' +
     '  <a href="#/pets" data-route="pets">🐾 我的设备</a>' +
+    '  <a href="#/report" data-route="report">📅 日报</a>' +
     '  <a href="#/status" data-route="status">📊 设备状态</a>' +
     '  <a href="#/track" data-route="track">🛤 轨迹回放</a>' +
     '  <a href="#/fence" data-route="fence">⭕ 电子围栏</a>' +
@@ -62,9 +63,9 @@
     '<nav class="nav-mobile">' +
     '  <a href="#/home" data-route="home"><span class="nm-ic">📍</span><span>地图</span></a>' +
     '  <a href="#/pets" data-route="pets"><span class="nm-ic">🐾</span><span>设备</span></a>' +
+    '  <a href="#/report" data-route="report"><span class="nm-ic">📅</span><span>日报</span></a>' +
     '  <a href="#/track" data-route="track"><span class="nm-ic">🛤</span><span>轨迹</span></a>' +
     '  <a href="#/fence" data-route="fence"><span class="nm-ic">⭕</span><span>围栏</span></a>' +
-    '  <a href="#/alerts" data-route="alerts"><span class="nm-ic">🚨</span><span>报警</span></a>' +
     '</nav>';
 
   function buildShell(container) {

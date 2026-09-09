@@ -14,7 +14,7 @@
   var PetStore = global.PetStore;
   var FenceStore = global.FenceStore;
 
-  var ROUTES = ['home', 'pets', 'status', 'debug', 'devices', 'fence', 'track', 'alerts'];
+  var ROUTES = ['home', 'pets', 'status', 'debug', 'devices', 'fence', 'track', 'alerts', 'report'];
 
   function parseHash() {
     var h = (global.location.hash || '#/home').replace(/^#\/?/, '');
@@ -44,6 +44,7 @@
       case 'fence': Views.renderFence(); break;
       case 'track': Views.renderTrack(p.arg); break;
       case 'alerts': Views.renderAlerts(); break;
+      case 'report': Views.renderReport(p.arg); break;
       default: Views.renderHome();
     }
   }

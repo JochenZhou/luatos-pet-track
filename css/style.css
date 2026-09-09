@@ -427,6 +427,46 @@ main { min-height: calc(100vh - 54px - 45px); }
   .nm-ic { font-size: 19px; }
 }
 
+/* ---------- 日报卡片 ---------- */
+.report-card {
+  background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
+  overflow: hidden; margin-bottom: 14px;
+}
+.rc-head {
+  display: flex; justify-content: space-between; align-items: center;
+  background: linear-gradient(135deg, #2f7bff, #5c9dff);
+  color: #fff; padding: 16px 18px;
+}
+.rc-brand { font-weight: 700; font-size: 15px; }
+.rc-date { font-size: 13px; opacity: .9; }
+.rc-device { padding: 12px 18px 0; font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rc-imei { color: var(--muted); font-size: 11px; font-weight: 400; }
+.rc-hero { text-align: center; padding: 20px 0 6px; }
+.rc-big { font-size: 44px; font-weight: 800; color: var(--primary); line-height: 1.1; }
+.rc-big-label { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.rc-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  padding: 14px 18px;
+}
+.rc-item {
+  background: var(--bg); border-radius: 12px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rc-item span { font-size: 11px; color: var(--muted); }
+.rc-item b { font-size: 14px; overflow-wrap: anywhere; }
+#rp-hours { width: 100%; height: auto; display: block; padding: 0 6px; box-sizing: border-box; }
+.rc-foot { padding: 10px 18px 16px; color: var(--muted); font-size: 12px; }
+.rp-actions { display: flex; gap: 10px; margin-bottom: 16px; }
+.rp-actions .btn { flex: 1; height: 42px; font-size: 14px; }
+.rp-export-img {
+  width: 100%; border-radius: var(--radius); box-shadow: var(--shadow);
+  margin-bottom: 16px; display: block;
+}
+@media (max-width: 768px) {
+  .rc-big { font-size: 38px; }
+  .rc-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
 /* ---------- Leaflet 覆写 ---------- */
 .leaflet-container { background: #f4f7fb; font-family: inherit; }
 .pet-marker { background: transparent; border: none; }

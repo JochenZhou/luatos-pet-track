@@ -29,6 +29,7 @@ JS_ORDER = [
     'js/app/petstatus.js',
     'js/app/views.js',
     'js/app/views2.js',
+    'js/app/views3.js',
     'js/app/main.js',
 ]
 
