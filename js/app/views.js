@@ -111,9 +111,20 @@
    * 报警 Tab 呼吸灯红点：存在围栏报警记录时，给「报警」入口加红色呼吸闪烁
    */
   function updateAlertDot() {
-    var has = FenceStore.alerts().length > 0;
+    var n = FenceStore.unhandledCount();
     U.$all('[data-route="alerts"]').forEach(function (a) {
-      a.classList.toggle('has-alert', has);
+      a.classList.toggle('has-alert', n > 0);
+      var dot = a.querySelector('.alert-count');
+      if (n > 0) {
+        if (!dot) {
+          dot = document.createElement('span');
+          dot.className = 'alert-count';
+          a.appendChild(dot);
+        }
+        dot.textContent = n > 99 ? '99+' : String(n);
+      } else if (dot) {
+        dot.parentNode.removeChild(dot);
+      }
     });
   }
 

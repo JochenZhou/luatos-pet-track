@@ -66,17 +66,14 @@ input, select, textarea { font-family: inherit; font-size: 13px; color: var(--te
 .nav-pc a.active { background: rgba(47, 123, 255, .10); color: var(--primary); font-weight: 600; }
 .nav-pc a:hover { color: var(--primary); }
 
-/* 报警 Tab 呼吸灯：有报警时红点闪烁 */
+/* 报警 Tab 红点：未处理数量数字气泡 */
 .nav-pc a.has-alert { position: relative; }
-.nav-pc a.has-alert::after {
-  content: ''; position: absolute; top: 4px; right: 4px;
-  width: 7px; height: 7px; border-radius: 50%;
-  background: #e74c3c;
-  animation: alert-breathe 1.3s ease-in-out infinite;
-}
-@keyframes alert-breathe {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, .55); }
-  50% { box-shadow: 0 0 0 6px rgba(231, 76, 60, 0); }
+.nav-pc a .alert-count {
+  position: absolute; top: 2px; right: 2px;
+  min-width: 15px; height: 15px; padding: 0 4px;
+  border-radius: 8px; background: #e74c3c; color: #fff;
+  font-size: 10px; line-height: 15px; text-align: center;
+  font-weight: 700; pointer-events: none;
 }
 
 /* ---------- 主区 ---------- */
@@ -195,16 +192,16 @@ main { min-height: calc(100vh - 54px - 45px); }
 .bat.bat-none { color: var(--muted); }
 .pc-loc { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--muted); }
 
-/* ---------- 弹窗（地图 popup） ---------- */
-.leaflet-popup-content-wrapper { border-radius: 16px; box-shadow: var(--shadow-lg); }
-.leaflet-popup-content { margin: 14px 16px; width: auto !important; min-width: 280px; max-width: 330px; }
-.pet-popup .pp-title { font-weight: 700; font-size: 15px; margin-bottom: 2px; }
-.pet-popup .pp-imei { color: var(--muted); font-size: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
-.pet-popup .pp-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 3px 0; }
-.pet-popup .pp-row span { color: var(--muted); white-space: nowrap; }
-.pet-popup .pp-row b { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
-.pet-popup .pp-addr b { max-width: 220px; }
-.pet-popup .pp-actions { margin-top: 10px; }
+/* ---------- 弹窗（TMap InfoWindow） ---------- */
+.pp-box { padding: 14px 16px; min-width: 280px; max-width: 330px; }
+.pp-title { font-weight: 700; font-size: 15px; margin-bottom: 2px; }
+.pp-imei { color: var(--muted); font-size: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.pp-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 3px 0; }
+.pp-row span { color: var(--muted); white-space: nowrap; }
+.pp-row b { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.pp-addr b { max-width: 220px; }
+.pp-actions { margin-top: 10px; }
+.pp-empty { color: var(--muted); }
 .pp-btn {
   width: 100%; height: 36px; border: none; border-radius: 10px;
   background: linear-gradient(135deg, #2f7bff, #5c9dff); color: #fff; font-weight: 600; font-size: 13px;
@@ -301,8 +298,14 @@ main { min-height: calc(100vh - 54px - 45px); }
   background: var(--card); border-radius: 14px; padding: 12px 16px; box-shadow: var(--shadow); margin-bottom: 10px;
   border-left: 4px solid var(--danger);
 }
+.al-item.al-done { border-left-color: #9aa3b2; opacity: .6; }
 .al-main b { font-size: 14px; }
 .al-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.al-act { margin-top: 8px; text-align: right; }
+.al-done-tag { color: #27ae60; font-size: 12px; font-weight: 600; }
+.al-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.al-count { color: var(--muted); font-size: 13px; }
+.al-count b { color: var(--danger); }
 
 /* ---------- 设备状态 ---------- */
 .st-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-top: 16px; }
@@ -319,6 +322,9 @@ main { min-height: calc(100vh - 54px - 45px); }
 .db-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .db-head b { font-size: 14px; }
 .db-imei { color: var(--muted); font-size: 12px; }
+.db-chart { margin-bottom: 12px; }
+.db-chart-t { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.db-canvas { width: 100%; height: 160px; display: block; background: #fbfcfe; border-radius: 8px; }
 .db-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
 .db-item {
   background: var(--bg); border-radius: 12px; padding: 10px 12px;
@@ -464,7 +470,7 @@ main { min-height: calc(100vh - 54px - 45px); }
   /* 搜索栏 */
   .search-bar input { height: 40px; }
   /* 地图弹窗适配小屏 */
-  .leaflet-popup-content { min-width: 230px; max-width: 260px; }
+  .pp-box { min-width: 230px; max-width: 260px; }
   /* 底部导航 */
   .nav-mobile a { font-size: 9.5px; }
   .nm-ic { font-size: 19px; }
@@ -525,8 +531,5 @@ main { min-height: calc(100vh - 54px - 45px); }
   .rc-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
-/* ---------- Leaflet 覆写 ---------- */
-.leaflet-container { background: #f4f7fb; font-family: inherit; }
-.pet-marker { background: transparent; border: none; }
-.leaflet-popup-content-wrapper { border-radius: 14px; box-shadow: var(--shadow-lg); }
-.leaflet-popup-content { margin: 12px 14px; width: auto !important; }
+/* ---------- TMap 覆写 ---------- */
+.tmap-infowindow { background: var(--card); border-radius: 14px; box-shadow: var(--shadow-lg); }

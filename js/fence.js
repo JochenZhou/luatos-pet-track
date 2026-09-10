@@ -133,7 +133,8 @@
       lng: point[0],
       lat: point[1],
       address: address || '',
-      ts: now
+      ts: now,
+      handled: false
     };
     list.unshift(alert);
     if (list.length > 200) list.length = 200;
@@ -143,6 +144,35 @@
 
   function clearAlerts() {
     saveAlerts([]);
+  }
+
+  function markHandled(id) {
+    var list = alerts();
+    var changed = false;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id && !list[i].handled) { list[i].handled = true; changed = true; }
+    }
+    if (changed) saveAlerts(list);
+    return changed;
+  }
+
+  function markAllHandled() {
+    var list = alerts();
+    var changed = false;
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i].handled) { list[i].handled = true; changed = true; }
+    }
+    if (changed) saveAlerts(list);
+    return changed;
+  }
+
+  function unhandledCount() {
+    var list = alerts();
+    var n = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i].handled) n++;
+    }
+    return n;
   }
 
   var FenceStore = {
@@ -157,7 +187,10 @@
     pointInPolygon: pointInPolygon,
     alerts: alerts,
     addAlert: addAlert,
-    clearAlerts: clearAlerts
+    clearAlerts: clearAlerts,
+    markHandled: markHandled,
+    markAllHandled: markAllHandled,
+    unhandledCount: unhandledCount
   };
 
   global.FenceStore = FenceStore;

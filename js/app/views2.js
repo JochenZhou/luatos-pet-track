@@ -33,6 +33,9 @@
       '    <button id="tr-query" class="btn">🔍 查询</button>' +
       '    <button id="tr-play" class="btn" disabled>▶️ 回放</button>' +
       '    <button id="tr-stop" class="btn ghost" disabled>⏹ 停止</button>' +
+      '    <select id="tr-speed" class="sel" title="回放倍率">' +
+      '      <option value="1">1×</option><option value="4">4×</option><option value="16">16×</option><option value="60">60×</option><option value="120" selected>120×</option><option value="240">240×</option><option value="600">600×</option><option value="1200">1200×</option><option value="2400">2400×</option>' +
+      '    </select>' +
       '  </div>' +
       '  <div id="tr-progress" class="tr-progress hidden"><div class="tr-bar"><div class="tr-fill"></div></div><span class="tr-text"></span></div>' +
       '  <div id="track-map" class="map-track"></div>' +
@@ -95,8 +98,16 @@
 
     document.getElementById('tr-play').addEventListener('click', function () {
       if (!trData.points.length) return;
+      var spdSel = document.getElementById('tr-speed');
+      trData.speed = spdSel ? (Number(spdSel.value) || 120) : 120;
       startReplay(trData);
     });
+    var spdSel = document.getElementById('tr-speed');
+    if (spdSel) {
+      spdSel.addEventListener('change', function () {
+        if (trData.playTimer) { startReplay(trData); }
+      });
+    }
     document.getElementById('tr-stop').addEventListener('click', function () {
       stopReplay(trData);
     });
@@ -105,40 +116,40 @@
   function drawTrack(points) {
     if (!MapKit.mapAlive()) return;
     MapKit.clearTemp();
-    var latlngs = [];
+    var path = [];
     points.forEach(function (p) {
       if (isFinite(p.lng) && isFinite(p.lat)) {
         var c = p.coord === CFG.COORD_WGS84 ? Algo.wgs84ToGcj02(p.lng, p.lat) : [p.lng, p.lat];
-        latlngs.push([c[1], c[0]]);
+        path.push(c);
       }
     });
-    if (latlngs.length) {
-      var line = L.polyline(latlngs, { color: '#2f7bff', weight: 4, opacity: 0.85 });
-      MapKit.addTemp(line);
-      var first = latlngs[0], last = latlngs[latlngs.length - 1];
-      MapKit.addTemp(L.circleMarker(first, { radius: 8, color: '#1abc5a', fillColor: '#1abc5a', fillOpacity: 1 }).bindPopup('起点'));
-      MapKit.addTemp(L.circleMarker(last, { radius: 8, color: '#e74c3c', fillColor: '#e74c3c', fillOpacity: 1 }).bindPopup('终点'));
-      MapKit.getMap().fitBounds(latlngs, { padding: [40, 40] });
+    if (path.length) {
+      MapKit.addTemp({ kind: 'polyline', points: path, color: '#2f7bff', weight: 4, opacity: 0.85 });
+      MapKit.addTemp({ kind: 'dot', point: path[0], radius: 8, color: '#1abc5a' });
+      MapKit.addTemp({ kind: 'dot', point: path[path.length - 1], radius: 8, color: '#e74c3c' });
+      MapKit.fitBounds(path, { padding: 40 });
     }
   }
 
   function startReplay(trData) {
     stopReplay(trData);
+    if (trData.marker) { trData.marker.remove(); trData.marker = null; }
     var myEpoch = MapKit.epoch();
     var pts = trData.points.filter(function (p) { return isFinite(p.lng) && isFinite(p.lat); });
     if (!pts.length) return;
     var idx = 0;
-    var m = L.circleMarker([pts[0].lat, pts[0].lng], { radius: 7, color: '#ff9f43', fillColor: '#ff9f43', fillOpacity: 1 });
-    MapKit.addTemp(m);
+    var m = MapKit.addTemp({ kind: 'dot', point: [pts[0].lng, pts[0].lat], radius: 7, color: '#ff9f43' });
     trData.marker = m;
-    // ×2400 等效：轨迹总时长压缩为 60 秒左右回放
-    var totalMs = Math.max(2000, Math.min(60000, (pts[pts.length - 1].ts - pts[0].ts) || 60000));
+    // 回放倍率（speed 由 UI 控制，默认 120）
+    var speed = trData.speed || 120;
+    var rawSpan = (pts[pts.length - 1].ts - pts[0].ts) || 60000;
+    var totalMs = Math.max(2000, rawSpan / speed);
     var stepMs = totalMs / pts.length;
     trData.playTimer = setInterval(function () {
       if (!MapKit.mapAlive() || MapKit.epoch() !== myEpoch) { stopReplay(trData); return; }
       if (idx >= pts.length) { stopReplay(trData); return; }
       var p = pts[idx];
-      m.setLatLng([p.lat, p.lng]);
+      if (m) m.move([p.lng, p.lat]);
       idx++;
     }, Math.max(16, stepMs));
   }
@@ -188,8 +199,8 @@
       st.mode = 'idle';
       st.circleCenter = null;
       st.polyPoints = [];
-      if (st.preview) { MapKit.getMap().removeLayer(st.preview); st.preview = null; }
-      if (st.previewCircle) { MapKit.getMap().removeLayer(st.previewCircle); st.previewCircle = null; }
+      if (st.preview) { st.preview.remove(); st.preview = null; }
+      if (st.previewCircle) { st.previewCircle.remove(); st.previewCircle = null; }
       hideTip();
     }
 
@@ -204,13 +215,13 @@
       tip('⬠ 依次点击加顶点，双击完成绘制');
     });
 
-    map.on('click', function (e) {
+    MapKit.on('click', function (e) {
       if (!MapKit.mapAlive()) return;
-      var lat = e.latlng.lat, lng = e.latlng.lng;
+      var lat = e.lat, lng = e.lng;
       if (st.mode === 'circle_center') {
         st.circleCenter = [lng, lat];
         st.mode = 'circle_radius';
-        st.preview = L.circleMarker([lat, lng], { radius: 5, color: '#2f7bff', fillOpacity: 1 }).addTo(map);
+        st.preview = MapKit.addTemp({ kind: 'dot', point: [lng, lat], radius: 5, color: '#2f7bff' });
         tip('再点一处确定半径（≥20 米）');
       } else if (st.mode === 'circle_radius') {
         var R = 6371000;
@@ -230,30 +241,30 @@
       } else if (st.mode === 'polygon') {
         st.polyPoints.push([lng, lat]);
         if (!st.preview) {
-          st.preview = L.polyline([], { color: '#9b59b6', weight: 3, dashArray: '6 4' }).addTo(map);
+          st.preview = MapKit.addTemp({ kind: 'polyline', points: [], color: '#9b59b6', weight: 3, dash: '6 4' });
         }
-        st.preview.setLatLngs(st.polyPoints.map(function (p) { return [p[1], p[0]]; }));
+        st.preview.setPath(st.polyPoints);
         tip('已加 ' + st.polyPoints.length + ' 个顶点，双击地图完成');
       }
     });
 
-    map.on('mousemove', function (e) {
+    MapKit.on('mousemove', function (e) {
       if (st.mode === 'circle_radius' && st.circleCenter && MapKit.mapAlive()) {
         var R = 6371000;
-        var dLat = (e.latlng.lat - st.circleCenter[1]) * Math.PI / 180;
-        var dLng = (e.latlng.lng - st.circleCenter[0]) * Math.PI / 180;
-        var la1 = st.circleCenter[1] * Math.PI / 180, la2 = e.latlng.lat * Math.PI / 180;
+        var dLat = (e.lat - st.circleCenter[1]) * Math.PI / 180;
+        var dLng = (e.lng - st.circleCenter[0]) * Math.PI / 180;
+        var la1 = st.circleCenter[1] * Math.PI / 180, la2 = e.lat * Math.PI / 180;
         var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
         var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         if (!st.previewCircle) {
-          st.previewCircle = L.circle([st.circleCenter[1], st.circleCenter[0]], { radius: dist, color: '#2f7bff', fillOpacity: 0.08, weight: 2 }).addTo(map);
+          st.previewCircle = MapKit.addTemp({ kind: 'circle', center: st.circleCenter, radius: dist, color: '#2f7bff', fillOpacity: 0.08 });
         } else {
           st.previewCircle.setRadius(dist);
         }
       }
     });
 
-    map.on('dblclick', function () {
+    MapKit.on('dblclick', function () {
       if (st.mode === 'polygon' && st.polyPoints.length >= 3) {
         var name = promptWithDefault('围栏名称：', '我的多边形围栏');
         if (name === null) { resetMode(); return; }
@@ -275,15 +286,11 @@
     MapKit.clearFences();
     FenceStore.all().forEach(function (f) {
       if (!f.enabled) return;
-      var layer = null;
       if (f.kind === 'circle') {
-        layer = L.circle([f.center[1], f.center[0]], { radius: f.radius, color: '#e67e22', fillOpacity: 0.08, weight: 2 })
-          .bindPopup(U.esc(f.name) + ' · 半径 ' + f.radius + 'm');
+        MapKit.addFence({ kind: 'circle', center: f.center, radius: f.radius, name: f.name });
       } else if (f.kind === 'polygon') {
-        layer = L.polygon(f.points.map(function (p) { return [p[1], p[0]]; }), { color: '#9b59b6', fillOpacity: 0.08, weight: 2 })
-          .bindPopup(U.esc(f.name));
+        MapKit.addFence({ kind: 'polygon', points: f.points, name: f.name });
       }
-      if (layer) MapKit.addFence(layer);
     });
   }
 
@@ -317,7 +324,7 @@
             drawAllFences();
           } else if (act === 'loc') {
             var c = f.kind === 'circle' ? f.center : f.points[0];
-            if (c && MapKit.mapAlive()) MapKit.getMap().setView([c[1], c[0]], 15);
+            if (c && MapKit.mapAlive()) MapKit.focusPoint(c, 15);
           } else if (act === 'del') {
             if (global.confirm('删除围栏「' + (f && f.name) + '」？')) {
               FenceStore.remove(id);
@@ -350,13 +357,38 @@
       box.innerHTML = '<div class="empty">暂无越界报警</div>';
       return;
     }
-    box.innerHTML = list.map(function (a) {
+    var unhandled = list.filter(function (a) { return !a.handled; }).length;
+    var toolbar = unhandled > 0
+      ? '<div class="al-toolbar"><span class="al-count">未处理 <b>' + unhandled + '</b> 条</span><button class="btn sm" id="al-all-handled">✅ 全部标记已处理</button></div>'
+      : '';
+    box.innerHTML = toolbar + list.map(function (a) {
       var f = FenceStore.get(a.fenceId);
-      return '<div class="al-item">' +
+      var doneCls = a.handled ? ' al-done' : '';
+      var tag = a.handled
+        ? '<span class="al-done-tag">✅ 已处理</span>'
+        : '<button class="btn sm" data-mark="' + U.esc(a.id) + '">✅ 标记已处理</button>';
+      return '<div class="al-item' + doneCls + '" data-id="' + U.esc(a.id) + '">' +
         '<div class="al-main"><b>' + U.esc(f ? f.name : '围栏已删除') + '</b> · <span>' + U.esc(PetStore.nameOf(a.imei)) + '</span></div>' +
         '<div class="al-sub">' + U.esc(U.fmtFull(a.ts)) + ' · ' + (a.address ? U.esc(a.address) : Number(a.lng).toFixed(5) + ',' + Number(a.lat).toFixed(5)) + '</div>' +
+        '<div class="al-act">' + tag + '</div>' +
         '</div>';
     }).join('');
+
+    U.$all('[data-mark]', box).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        FenceStore.markHandled(btn.getAttribute('data-mark'));
+        Views.updateAlertDot();
+        renderAlertsList();
+      });
+    });
+    var allBtn = document.getElementById('al-all-handled');
+    if (allBtn) {
+      allBtn.addEventListener('click', function () {
+        FenceStore.markAllHandled();
+        Views.updateAlertDot();
+        renderAlertsList();
+      });
+    }
   }
 
   /* ================= #/status 设备状态 ================= */
@@ -539,7 +571,14 @@
         var hrs = (vbat[vbat.length - 1].ts - vbat[0].ts) / 3600000;
         if (hrs > 0.2) drain = Math.round(dv / hrs) + ' mV/h';
       }
+      var sigChart = sig.length >= 2
+        ? '<div class="db-chart"><div class="db-chart-t">📶 信号（' + U.signalText(sig[sig.length - 1].v) + '）</div><canvas class="db-canvas" data-k="sig"></canvas></div>'
+        : '';
+      var vbatChart = vbat.length >= 2
+        ? '<div class="db-chart"><div class="db-chart-t">🔋 电压（mV）</div><canvas class="db-canvas" data-k="vbat"></canvas></div>'
+        : '';
       box.innerHTML =
+        sigChart + vbatChart +
         '<div class="db-grid">' +
         dbItem('📶 信号', sig.length ? (sig[sig.length - 1].v + '（' + U.signalText(sig[sig.length - 1].v) + '）') : '--') +
         dbItem('🔋 电压', vbat.length ? (vbat[vbat.length - 1].v + ' mV · 耗电 ' + drain) : '--') +
@@ -553,6 +592,19 @@
           return '<div class="db-rec" data-imei="' + U.esc(imei) + '">🕒 ' + U.esc(r.ct || '') + ' · ' + U.esc(r.device_type || '') + ' · ' + Object.keys(r).filter(function (k) { return k.indexOf('val_') === 0 || /^\d+$/.test(k); }).map(function (k) { return U.esc(k) + '=' + U.esc(String(r[k])); }).join(' · ') + '</div>';
         }).join('') +
         '</div></details>';
+      // 画信号/电压曲线（布局完成后）
+      var drawCharts = function () {
+        U.$all('.db-canvas', box).forEach(function (cv) {
+          var k = cv.getAttribute('data-k');
+          var series = k === 'sig' ? thinSeries(sig) : thinSeries(vbat);
+          drawLineChart(cv, series, { color: k === 'sig' ? '#2f7bff' : '#27ae60' });
+        });
+      };
+      if (typeof global.requestAnimationFrame === 'function') {
+        global.requestAnimationFrame(drawCharts);
+      } else {
+        drawCharts();
+      }
       // 点击数据包弹全字段
       U.$all('.db-rec', box).forEach(function (el2) {
         el2.addEventListener('click', function () {
@@ -561,6 +613,111 @@
         });
       });
     });
+  }
+
+  /* ---------------- 曲线图工具（纯 Canvas，无依赖） ---------------- */
+
+  function tickLabel(ts) {
+    var d = new Date(ts);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function thinSeries(arr, maxN) {
+    maxN = maxN || 200;
+    if (!arr || arr.length <= maxN) return arr || [];
+    var out = [];
+    var step = arr.length / maxN;
+    for (var i = 0; i < maxN; i++) out.push(arr[Math.floor(i * step)]);
+    out.push(arr[arr.length - 1]);
+    return out;
+  }
+
+  function drawLineChart(canvas, data, opts) {
+    opts = opts || {};
+    var color = opts.color || '#2f7bff';
+    if (!canvas || !data || data.length < 2) return;
+    var dpr = global.devicePixelRatio || 1;
+    var cssW = canvas.clientWidth || 600;
+    var cssH = canvas.clientHeight || 160;
+    canvas.width = cssW * dpr;
+    canvas.height = cssH * dpr;
+    var ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    var padL = 46, padR = 10, padT = 12, padB = 20;
+    var plotW = cssW - padL - padR;
+    var plotH = cssH - padT - padB;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    var min = Infinity, max = -Infinity, i;
+    for (i = 0; i < data.length; i++) {
+      if (data[i].v < min) min = data[i].v;
+      if (data[i].v > max) max = data[i].v;
+    }
+    if (min === max) { min -= 1; max += 1; }
+    var pad = (max - min) * 0.12 || 1;
+    min -= pad; max += pad;
+    var t0 = data[0].ts, t1 = data[data.length - 1].ts;
+    var span = Math.max(1, t1 - t0);
+    function X(t) { return padL + (t - t0) / span * plotW; }
+    function Y(v) { return padT + (1 - (v - min) / (max - min)) * plotH; }
+
+    // 背景
+    ctx.fillStyle = '#fbfcfe';
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    // 横向网格 + y 轴刻度
+    ctx.font = '10px sans-serif';
+    ctx.lineWidth = 1;
+    var steps = 3;
+    for (i = 0; i <= steps; i++) {
+      var v = max - (max - min) * i / steps;
+      var y = Y(v);
+      ctx.strokeStyle = '#eef2f7';
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(cssW - padR, y); ctx.stroke();
+      ctx.fillStyle = '#9aa3b2';
+      ctx.textAlign = 'left';
+      ctx.fillText(String(Math.round(v)), 4, y + 3);
+    }
+
+    // x 轴刻度（首/中/尾，本地钟面直出）
+    ctx.fillStyle = '#9aa3b2';
+    ctx.textAlign = 'left';
+    ctx.fillText(tickLabel(t0), padL, cssH - 6);
+    ctx.textAlign = 'center';
+    ctx.fillText(tickLabel(t0 + span / 2), padL + plotW / 2, cssH - 6);
+    ctx.textAlign = 'right';
+    ctx.fillText(tickLabel(t1), cssW - padR, cssH - 6);
+
+    // 面积渐变
+    ctx.beginPath();
+    ctx.moveTo(X(t0), Y(data[0].v));
+    for (i = 0; i < data.length; i++) ctx.lineTo(X(data[i].ts), Y(data[i].v));
+    ctx.lineTo(X(t1), padT + plotH);
+    ctx.lineTo(X(t0), padT + plotH);
+    ctx.closePath();
+    var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+    grad.addColorStop(0, color + '33');
+    grad.addColorStop(1, color + '00');
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // 折线
+    ctx.beginPath();
+    for (i = 0; i < data.length; i++) {
+      var px = X(data[i].ts), py = Y(data[i].v);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // 末点
+    ctx.beginPath();
+    ctx.arc(X(t1), Y(data[data.length - 1].v), 3, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
   }
 
   function dbItem(label, value) {

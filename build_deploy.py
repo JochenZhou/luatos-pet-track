@@ -34,9 +34,7 @@ JS_ORDER = [
 ]
 
 PLACEHOLDERS = {
-    '__LEAFLET_CSS__': 'vendor/leaflet.css',
     '__STYLE__': 'css/style.css',
-    '__LEAFLET_JS__': 'vendor/leaflet.js',
     '__JSENCRYPT_JS__': 'vendor/jsencrypt.min.js',
 }
 
@@ -91,11 +89,8 @@ def main():
     html = template
     for ph, path in PLACEHOLDERS.items():
         content = read(path)
-        if ph in ('__LEAFLET_JS__', '__JSENCRYPT_JS__'):
+        if ph == '__JSENCRYPT_JS__':
             html = inject_inline_js(html, ph, content)
-        elif ph == '__LEAFLET_CSS__':
-            # CSS 里可能出现 </style> 极少；直接注入
-            html = html.replace(ph, content.replace('</style>', '<\\/style>'))
         else:
             html = html.replace(ph, content)
     # 业务脚本注入
@@ -119,7 +114,12 @@ def main():
         # jsencrypt 可能含 eval 字样，检查上下文
         pass
     bad = []
-    if '<script src' in html_text: bad.append('外链 script')
+    # 仅 TMap 外链脚本允许（合宙放行 map.qq.com），其余外链 script 视为违规
+    import re
+    external_scripts = re.findall(r'<script\s+src=["\']([^"\']+)["\']', html_text)
+    for src in external_scripts:
+        if 'map.qq.com' not in src:
+            bad.append('外链 script: ' + src)
     if 'cdn' in html_text.lower(): bad.append('CDN 字样')
     if bad:
         print('审核红线警告：%s' % '; '.join(bad))
