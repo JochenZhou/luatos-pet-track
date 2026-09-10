@@ -97,7 +97,7 @@
             android:layout_height="wrap_content"
             android:padding="16dp"
             android:gravity="center"
-            android:text="v0.4.1"
+            android:text="v0.4.2"
             android:textColor="#9ca3af"
             android:textSize="12sp" />
     </LinearLayout>

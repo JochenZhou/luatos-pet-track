@@ -2,22 +2,33 @@ package com.jochen.luatos_pet_track;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.media.MediaScannerConnection;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
 
 import androidx.drawerlayout.widget.DrawerLayout;
 
@@ -72,6 +83,9 @@ public class MainActivity extends Activity {
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
 
+        webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+        installImageSaveHook();
+
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
 
@@ -90,6 +104,7 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 updateAppMenuLayout(url);
+                injectSaveHook();
             }
 
             @Override
@@ -152,6 +167,54 @@ public class MainActivity extends Activity {
                         + "})();", null), 80);
     }
 
+    /**
+     * 拦截网页端"保存图片"（a.download=data:image/png）与长按日报图，交给原生相册保存。
+     * 网页端原有下载逻辑不动：普通浏览器里仍是原生下载行为。
+     */
+    private static final String SAVE_HOOK_JS = "(function(){"
+            + "if(window.__appSaveHookInstalled)return;window.__appSaveHookInstalled=1;"
+            + "function bridge(u,n){try{window.AndroidBridge&&window.AndroidBridge.saveImage(u,n||'日报.png');}catch(e){}}"
+            // 1) 保存图片按钮 = 程序化 a.click()，在这里拦截 data:image/png
+            + "var oc=HTMLAnchorElement.prototype.click;"
+            + "HTMLAnchorElement.prototype.click=function(){"
+            + "try{if(this.getAttribute&&this.getAttribute('download')&&this.href&&this.href.indexOf('data:image/png')===0){"
+            + "bridge(this.href,this.getAttribute('download'));return;}}catch(e){}"
+            + "return oc.apply(this,arguments);};"
+            // 2) 长按日报图片（.rp-export-img）600ms 保存
+            + "var t=null,el=null;"
+            + "document.addEventListener('touchstart',function(ev){t=null;el=null;"
+            + "var n=ev.target;while(n&&n!==document.body){"
+            + "if(n.classList&&n.classList.contains('rp-export-img')){el=n;break;}n=n.parentElement;}"
+            + "if(el){var s=el;t=setTimeout(function(){bridge(s.src,'日报.png');t=null;},600);}},{passive:true});"
+            + "document.addEventListener('touchmove',function(){if(t){clearTimeout(t);t=null;}},{passive:true});"
+            + "document.addEventListener('touchend',function(){if(t){clearTimeout(t);t=null;}},{passive:true});"
+            + "})();";
+
+    private void installImageSaveHook() {
+        // 兜底：个别 WebView 版本会把 a.download 的 data: URL 交给 DownloadListener
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            if (url != null && url.startsWith("data:image/png")) {
+                callSaveImage(url, "日报.png");
+            }
+        });
+    }
+
+    /** 每个页面加载完注入保存钩子（幂等，重复注入无害） */
+    private void injectSaveHook() {
+        webView.evaluateJavascript(SAVE_HOOK_JS, null);
+    }
+
+    private void callSaveImage(String dataUrl, String fileName) {
+        webView.evaluateJavascript(
+                "window.AndroidBridge && window.AndroidBridge.saveImage('"
+                        + escapeJs(dataUrl) + "','" + escapeJs(fileName) + "')",
+                null);
+    }
+
+    private String escapeJs(String value) {
+        return value.replace("\\", "\\\\").replace("'", "\\'");
+    }
+
     /** 动态构建侧边栏菜单项 */
     private void setupDrawerMenu() {
         LinearLayout menuList = findViewById(R.id.menu_list);
@@ -170,6 +233,61 @@ public class MainActivity extends Activity {
                 navigate(hash);
             });
             menuList.addView(item);
+        }
+    }
+
+    /** 保存日报图片到系统相册 */
+    private class AndroidBridge {
+        @JavascriptInterface
+        public void saveImage(String dataUrl, String fileName) {
+            new Thread(() -> {
+                try {
+                    String encoded = dataUrl.substring(dataUrl.indexOf(',') + 1);
+                    byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+                    String safeName = (fileName == null || fileName.length() == 0)
+                            ? "日报.png" : fileName.replaceAll("[^\\u4e00-\\u9fa5a-zA-Z0-9._-]", "_");
+                    if (!safeName.toLowerCase().endsWith(".png")) safeName += ".png";
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        ContentValues values = new ContentValues();
+                        values.put(MediaStore.Images.Media.DISPLAY_NAME, safeName);
+                        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+                        values.put(MediaStore.Images.Media.RELATIVE_PATH,
+                                Environment.DIRECTORY_PICTURES + "/合宙运动传感器");
+                        values.put(MediaStore.Images.Media.IS_PENDING, 1);
+                        Uri uri = getContentResolver().insert(
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                        if (uri == null) throw new IllegalStateException("无法创建相册文件");
+                        try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                            out.write(bytes);
+                        }
+                        values.clear();
+                        values.put(MediaStore.Images.Media.IS_PENDING, 0);
+                        getContentResolver().update(uri, values, null, null);
+                    } else {
+                        if (checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE")
+                                != PackageManager.PERMISSION_GRANTED) {
+                            runOnUiThread(() -> requestPermissions(
+                                    new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, 12));
+                            return;
+                        }
+                        File dir = new File(Environment.getExternalStoragePublicDirectory(
+                                Environment.DIRECTORY_PICTURES), "合宙运动传感器");
+                        if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("无法创建相册目录");
+                        File file = new File(dir, safeName);
+                        try (FileOutputStream out = new FileOutputStream(file)) {
+                            out.write(bytes);
+                        }
+                        MediaScannerConnection.scanFile(MainActivity.this,
+                                new String[]{file.getAbsolutePath()}, new String[]{"image/png"}, null);
+                    }
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                            "日报图片已保存到相册", Toast.LENGTH_SHORT).show());
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                            "保存图片失败", Toast.LENGTH_SHORT).show());
+                }
+            }).start();
         }
     }
 
