@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -86,6 +87,12 @@ public class MainActivity extends Activity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                updateAppMenuLayout(url);
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String host = uri.getHost() == null ? "" : uri.getHost();
@@ -122,6 +129,27 @@ public class MainActivity extends Activity {
         } else {
             webView.loadUrl(LOGIN_URL);
         }
+    }
+
+    /**
+     * 原生按钮覆盖在 WebView 上层，因此首页顶栏必须为它预留左侧空间。
+     * 登录页不显示按钮；进入 index.html 后显示按钮并把网页标题向右推 62dp。
+     */
+    private void updateAppMenuLayout(String url) {
+        TextView menu = findViewById(R.id.btn_menu);
+        if (menu == null || webView == null) return;
+        boolean inApp = url != null && url.contains("index.html");
+        menu.setVisibility(inApp ? View.VISIBLE : View.GONE);
+        if (!inApp) return;
+
+        final int inset = 62;
+        webView.postDelayed(() -> webView.evaluateJavascript(
+                "(function(){var e=document.querySelector('.topbar');"
+                        + "if(e){e.style.paddingLeft='" + inset + "px';}"
+                        + "var b=document.querySelector('.brand');"
+                        + "if(b){b.style.minWidth='0';b.style.overflow='hidden';"
+                        + "b.style.whiteSpace='nowrap';b.style.textOverflow='ellipsis';}"
+                        + "})();", null), 80);
     }
 
     /** 动态构建侧边栏菜单项 */

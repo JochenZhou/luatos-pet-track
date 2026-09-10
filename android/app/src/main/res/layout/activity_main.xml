@@ -36,6 +36,7 @@
             android:text="☰"
             android:textColor="#1f2937"
             android:textSize="22sp"
+            android:visibility="gone"
             android:elevation="6dp" />
     </FrameLayout>
 
@@ -96,7 +97,7 @@
             android:layout_height="wrap_content"
             android:padding="16dp"
             android:gravity="center"
-            android:text="v0.4.0"
+            android:text="v0.4.1"
             android:textColor="#9ca3af"
             android:textSize="12sp" />
     </LinearLayout>
