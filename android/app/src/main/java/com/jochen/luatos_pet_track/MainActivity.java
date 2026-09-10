@@ -137,8 +137,6 @@ public class MainActivity extends Activity {
 
         setupDrawerMenu();
 
-        findViewById(R.id.btn_menu).setOnClickListener(v -> drawer.openDrawer(Gravity.START));
-
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState);
         } else {
@@ -147,24 +145,39 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 原生按钮覆盖在 WebView 上层，因此首页顶栏必须为它预留左侧空间。
-     * 登录页不显示按钮；进入 index.html 后显示按钮并把网页标题向右推 62dp。
+     * APP 专用顶栏菜单：注入到网页自身的 .topbar，不再悬浮覆盖标题。
+     * 页面脚本异步构建外壳，所以找不到顶栏时短暂重试。
+     */
+    private static final String APP_MENU_JS = "(function(){"
+            + "function install(){"
+            + "var top=document.querySelector('.topbar');"
+            + "if(!top){if(!window.__androidMenuTimer){window.__androidMenuTimer=setInterval(function(){"
+            + "if(document.querySelector('.topbar')){clearInterval(window.__androidMenuTimer);"
+            + "window.__androidMenuTimer=null;install();}},100);}return;}"
+            + "if(document.getElementById('android-app-menu'))return;"
+            + "var b=document.createElement('button');b.type='button';"
+            + "b.id='android-app-menu';b.className='android-app-menu';"
+            + "b.setAttribute('aria-label','打开菜单');b.title='打开菜单';b.textContent='☰';"
+            + "b.style.cssText='flex:0 0 32px;width:32px;height:32px;margin:0 8px 0 0;"
+            + "padding:0;border:1px solid #e5e9f2;border-radius:10px;background:#fff;"
+            + "color:#2f7bff;font-size:18px;line-height:30px;text-align:center;"
+            + "box-shadow:none;cursor:pointer;display:flex;align-items:center;"
+            + "justify-content:center;';"
+            + "b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();"
+            + "if(window.AndroidBridge&&window.AndroidBridge.openDrawer)window.AndroidBridge.openDrawer();});"
+            + "top.insertBefore(b,top.firstChild);"
+            + "var brand=top.querySelector('.brand');if(brand){brand.style.minWidth='0';"
+            + "brand.style.overflow='hidden';brand.style.whiteSpace='nowrap';"
+            + "brand.style.textOverflow='ellipsis';brand.style.flex='1 1 auto';}"
+            + "}install();})();";
+
+    /**
+     * 顶栏按钮嵌入 WebView 页面；登录页不显示，首页及各 hash 路由共用同一顶栏。
      */
     private void updateAppMenuLayout(String url) {
-        TextView menu = findViewById(R.id.btn_menu);
-        if (menu == null || webView == null) return;
         boolean inApp = url != null && url.contains("index.html");
-        menu.setVisibility(inApp ? View.VISIBLE : View.GONE);
         if (!inApp) return;
-
-        final int inset = 62;
-        webView.postDelayed(() -> webView.evaluateJavascript(
-                "(function(){var e=document.querySelector('.topbar');"
-                        + "if(e){e.style.paddingLeft='" + inset + "px';}"
-                        + "var b=document.querySelector('.brand');"
-                        + "if(b){b.style.minWidth='0';b.style.overflow='hidden';"
-                        + "b.style.whiteSpace='nowrap';b.style.textOverflow='ellipsis';}"
-                        + "})();", null), 80);
+        webView.postDelayed(() -> webView.evaluateJavascript(APP_MENU_JS, null), 80);
     }
 
     /**
@@ -238,6 +251,13 @@ public class MainActivity extends Activity {
 
     /** 保存日报图片到系统相册 */
     private class AndroidBridge {
+        @JavascriptInterface
+        public void openDrawer() {
+            runOnUiThread(() -> {
+                if (drawer != null) drawer.openDrawer(Gravity.START);
+            });
+        }
+
         @JavascriptInterface
         public void saveImage(String dataUrl, String fileName) {
             new Thread(() -> {

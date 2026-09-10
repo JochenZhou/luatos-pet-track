@@ -23,21 +23,6 @@
             android:layout_gravity="top"
             android:max="100"
             android:progressTint="#2f7bff" />
-
-        <!-- 左上角汉堡按钮：打开侧边栏 -->
-        <TextView
-            android:id="@+id/btn_menu"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
-            android:layout_gravity="top|start"
-            android:layout_margin="10dp"
-            android:background="@drawable/bg_menu_btn"
-            android:gravity="center"
-            android:text="☰"
-            android:textColor="#1f2937"
-            android:textSize="22sp"
-            android:visibility="gone"
-            android:elevation="6dp" />
     </FrameLayout>
 
     <!-- 侧边栏抽屉 -->
@@ -97,7 +82,7 @@
             android:layout_height="wrap_content"
             android:padding="16dp"
             android:gravity="center"
-            android:text="v0.4.2"
+            android:text="v0.4.3"
             android:textColor="#9ca3af"
             android:textSize="12sp" />
     </LinearLayout>
