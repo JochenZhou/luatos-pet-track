@@ -6,29 +6,50 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.View;
-import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.TextView;
+
+import androidx.drawerlayout.widget.DrawerLayout;
 
 /**
- * 主 Activity：WebView 加载平台部署的 Web 应用
- * 页面地址 = https://iot.luatos.com/ai_app/luatos/pet_track_jochen/login.html
+ * 主 Activity：WebView 加载平台部署的 Web 应用 + 左侧抽屉菜单。
+ * 侧边栏列出网页版全部 9 个功能 Tab，点击后通过 hash 路由跳转（不刷新页面、不丢登录态）。
+ * 登录页 = https://iot.luatos.com/ai_app/luatos/pet_track_jochen/login.html
  * OAuth 三方跳转（api-iot.luatos.com / iot.openluat.com）在本 WebView 内完成，
  * 登录态 localStorage 与浏览器一致，刷新不丢。
  */
 public class MainActivity extends Activity {
 
-    private static final String APP_URL =
+    private static final String LOGIN_URL =
             "https://iot.luatos.com/ai_app/luatos/pet_track_jochen/login.html";
+    private static final String INDEX_URL =
+            "https://iot.luatos.com/ai_app/luatos/pet_track_jochen/index.html";
+
+    /** 侧边栏菜单：{名称, hash 路由}，与网页版导航一一对应 */
+    private static final String[][] MENUS = {
+            {"📍 实时地图", "#/home"},
+            {"🐾 我的设备", "#/pets"},
+            {"📅 日报", "#/report"},
+            {"📊 设备状态", "#/status"},
+            {"🛤 轨迹回放", "#/track"},
+            {"⭕ 电子围栏", "#/fence"},
+            {"🚨 报警", "#/alerts"},
+            {"🖥 设备管理", "#/devices"},
+            {"🔧 性能监控", "#/debug"},
+    };
 
     private WebView webView;
     private ProgressBar progressBar;
+    private DrawerLayout drawer;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -38,6 +59,7 @@ public class MainActivity extends Activity {
 
         webView = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress);
+        drawer = findViewById(R.id.drawer);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -48,9 +70,6 @@ public class MainActivity extends Activity {
         s.setSupportZoom(false);
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // 深色模式跟随系统由网页自身 CSS 处理，这里强制浅色避免样式错乱
-        }
 
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
@@ -94,11 +113,50 @@ public class MainActivity extends Activity {
             }
         });
 
+        setupDrawerMenu();
+
+        findViewById(R.id.btn_menu).setOnClickListener(v -> drawer.openDrawer(Gravity.START));
+
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState);
         } else {
-            webView.loadUrl(APP_URL);
+            webView.loadUrl(LOGIN_URL);
         }
+    }
+
+    /** 动态构建侧边栏菜单项 */
+    private void setupDrawerMenu() {
+        LinearLayout menuList = findViewById(R.id.menu_list);
+        for (String[] m : MENUS) {
+            final String hash = m[1];
+            TextView item = new TextView(this);
+            item.setText(m[0]);
+            item.setTextSize(16);
+            item.setTextColor(0xFF1F2937);
+            item.setGravity(Gravity.CENTER_VERTICAL);
+            item.setSingleLine(true);
+            item.setPadding(dp(20), dp(15), dp(20), dp(15));
+            item.setBackgroundResource(R.drawable.menu_item_bg);
+            item.setOnClickListener(v -> {
+                drawer.closeDrawers();
+                navigate(hash);
+            });
+            menuList.addView(item);
+        }
+    }
+
+    /** 跳转到指定 hash 路由：已登录则原地切 hash（不刷新），否则直接带 hash 打开首页 */
+    private void navigate(String hash) {
+        String url = webView.getUrl();
+        if (url != null && url.contains("index.html")) {
+            webView.evaluateJavascript("location.hash='" + hash + "';", null);
+        } else {
+            webView.loadUrl(INDEX_URL + hash);
+        }
+    }
+
+    private int dp(int v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 
     @Override
@@ -109,7 +167,9 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
+        if (drawer != null && drawer.isDrawerOpen(Gravity.START)) {
+            drawer.closeDrawers();
+        } else if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
             super.onBackPressed();
