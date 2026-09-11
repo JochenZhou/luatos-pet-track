@@ -7,6 +7,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
@@ -52,10 +53,23 @@ import androidx.drawerlayout.widget.DrawerLayout;
  */
 public class MainActivity extends Activity {
 
-    private static final String LOGIN_URL =
-            "https://iot.luatos.com/ai_app/luatos/pet_track_jochen/login.html";
-    private static final String INDEX_URL =
-            "https://iot.luatos.com/ai_app/luatos/pet_track_jochen/index.html";
+    /** 应用根地址：页面 URL 统一在这里拼，避免同域名散落多处 */
+    private static final String BASE_APP_URL =
+            "https://iot.luatos.com/ai_app/luatos/pet_track_jochen/";
+
+    /**
+     * 给页面 URL 拼上 APK 版本号。
+     * 平台只发 Last-Modified、不发 Cache-Control，同一个 URL WebView 会一直复用旧副本，
+     * 表现是「网页已经更新，APP 里还是旧样式」（曾出现登录按钮改成青色后 APP 仍是蓝色）。
+     * 带上 ?v=&lt;versionName&gt; 后，换版本必定取到新文件。
+     */
+    private String withBuild(String url) {
+        return url + "?v=" + appVersionName();
+    }
+
+    private String loginUrl() { return withBuild(BASE_APP_URL + "login.html"); }
+
+    private String indexUrl() { return withBuild(BASE_APP_URL + "index.html"); }
 
     /** 侧边栏菜单：{名称, hash 路由}，与网页版导航一一对应 */
     private static final String[][] MENUS = {
@@ -88,6 +102,8 @@ public class MainActivity extends Activity {
     private static final String PREFS = "pettrack_theme";
     private static final String PREF_ACCENT = "accent";
     private static final String DEFAULT_ACCENT = "teal";
+    /** 上次启动时的 APK 版本号：版本变了就清一次 WebView HTTP 缓存（见 clearStaleWebCache） */
+    private static final String PREF_WEB_VER = "web_ver";
 
     /** {key, brand-700(头部渐变起), brand-600(主色/进度条), brand-100(头部副标题), brand-50(菜单按下底), aurora-500(渐变末)} */
     private static final String[][] ACCENTS = {
@@ -204,7 +220,9 @@ public class MainActivity extends Activity {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState);
         } else {
-            webView.loadUrl(LOGIN_URL);
+            // 只在「冷启动且 APK 换过版本」时清一次 HTTP 缓存，平时照常走缓存
+            clearStaleWebCache();
+            webView.loadUrl(loginUrl());
         }
         handleIntentHash(getIntent());
     }
@@ -614,8 +632,26 @@ public class MainActivity extends Activity {
         if (url != null && url.contains("index.html")) {
             webView.evaluateJavascript("location.hash='" + hash + "';", null);
         } else {
-            webView.loadUrl(INDEX_URL + hash);
+            webView.loadUrl(indexUrl() + hash);
         }
+    }
+
+    /**
+     * APK 版本变化后清一次 WebView 的 HTTP 缓存。
+     * 网页部署在合宙平台上、不随 APK 一起更新，用户装了新版 APK 仍可能命中旧页面缓存
+     * （表现为「网页明明改了，APP 里还是旧样式」）。只清 HTTP 缓存，绝不动 localStorage ——
+     * 登录态和用户设置都存在里面。
+     */
+    private void clearStaleWebCache() {
+        try {
+            SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+            String now = appVersionName();
+            if (now.length() == 0) return;
+            if (!now.equals(sp.getString(PREF_WEB_VER, ""))) {
+                webView.clearCache(true);
+                sp.edit().putString(PREF_WEB_VER, now).apply();
+            }
+        } catch (Exception ignored) { /* 清缓存失败不应拦住启动 */ }
     }
 
     private int dp(int v) {

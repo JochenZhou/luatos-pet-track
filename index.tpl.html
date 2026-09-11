@@ -2,6 +2,11 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <!-- 防缓存：平台只发 Last-Modified，没有 Cache-Control。页面跳转统一再带 ?v=BUILD
+       （见 js/config.js 的 BUILD），这里作为第二道保险。 -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <meta name="theme-color" content="#F5F7FB">
   <title>合宙IoT-运动传感器</title>

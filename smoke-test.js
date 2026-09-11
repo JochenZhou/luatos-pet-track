@@ -519,6 +519,58 @@ return AC.request('/list_my_projects', {}).then(r => {
       && javaText.indexOf('applyAccent(savedAccent())') > 0,
       'T123 侧边栏头部有 id，且桥方法/启动同步齐备');
 
+    /* ================= 设备列表增量渲染 + 请求失败保留旧数据 ================= */
+    const viewsText = fs.readFileSync(path.join(ROOT, 'js/app/views.js'), 'utf8');
+    // 卡片列表必须按 imei 增量更新：整表 innerHTML 重建会让毛玻璃(backdrop-filter)
+    // 合成层反复销毁重建，移动端表现为肉眼可见的闪烁
+    ok(viewsText.indexOf('box.innerHTML = html') < 0
+      && viewsText.indexOf('function makeCard(imei)') > 0
+      && viewsText.indexOf('function paintCard(el, st)') > 0
+      && viewsText.indexOf('cardNodes[imei]') > 0,
+      'T124 设备卡片按 imei 增量渲染（不再整表 innerHTML 重建）');
+    // 单台设备的回调必须合并成一次重绘，否则一轮 N 台设备就重画 N 遍
+    ok(viewsText.indexOf('function scheduleCardsPaint()') > 0
+      && /cardsScheduled\s*=\s*setTimeout/.test(viewsText),
+      'T125 单台设备回调合并为一次重绘');
+    // 本轮拿不到定位（AC.request 永不 reject，失败是 resolve 成 found:false）
+    // 不能把卡片打回「无定位」——那是「一会有数据一会没数据」的根因
+    ok(viewsText.indexOf('function keepPrevious(imei, name)') > 0
+      && /if \(!st\.found\) \{[\s\S]{0,200}keepPrevious\(imei/.test(viewsText)
+      && viewsText.indexOf('out[imei] = prev;') > 0,
+      'T126 本轮无定位时沿用上一轮有效数据，不打回无定位');
+
+    /* ================= 构建号防缓存（合宙平台不发 Cache-Control） ================= */
+    const cfgText = fs.readFileSync(path.join(ROOT, 'js/config.js'), 'utf8');
+    const buildM = cfgText.match(/var BUILD = '([\d.]+)'/);
+    const gradleText = fs.readFileSync(path.join(ROOT, 'android/app/build.gradle'), 'utf8');
+    const gradleVer = (gradleText.match(/versionName "([\d.]+)"/) || [])[1];
+    const loginBuildM = loginText.match(/var BUILD = '([\d.]+)'/);
+    ok(!!buildM && !!gradleVer && !!loginBuildM
+      && buildM[1] === gradleVer && loginBuildM[1] === gradleVer
+      && cfgText.indexOf('BUILD: BUILD') > 0,
+      'T127 BUILD 三处一致（config.js / login.html / build.gradle versionName）'
+      + (buildM ? ' [config=' + buildM[1] + ' login=' + (loginBuildM && loginBuildM[1])
+        + ' gradle=' + gradleVer + ']' : ''));
+    // 页面跳转必须带 ?v=，否则浏览器/WebView 复用旧 HTML
+    // （登录按钮改成青色后用户仍看到旧蓝色，就是这么来的）
+    const airText = fs.readFileSync(path.join(ROOT, 'js/api/aircloud.js'), 'utf8');
+    ok(airText.indexOf('function withBuild(url)') > 0
+      && /function redirectToLogin[\s\S]{0,300}withBuild\(/.test(airText)
+      && /function redirectToApp[\s\S]{0,200}withBuild\(/.test(airText)
+      && /location\.replace\(withBuild\(target\)\)/.test(loginText)
+      && loginText.indexOf('http-equiv="Cache-Control"') > 0
+      && tplText.indexOf('http-equiv="Cache-Control"') > 0,
+      'T128 页面跳转统一带构建号 + HTML 声明 no-cache');
+    // 原生外壳：加载 URL 带版本号，且换版本时清一次 HTTP 缓存（不动 localStorage）
+    ok(javaText.indexOf('private String withBuild(String url)') > 0
+      && javaText.indexOf('webView.loadUrl(loginUrl())') > 0
+      && javaText.indexOf('webView.loadUrl(indexUrl() + hash)') > 0
+      && javaText.indexOf('private void clearStaleWebCache()') > 0
+      && javaText.indexOf('webView.clearCache(true)') > 0
+      && javaText.indexOf('clearStaleWebCache();') > 0
+      && javaText.indexOf('import android.content.SharedPreferences;') > 0,
+      'T129 Android 加载 URL 带版本号 + 换版本清 HTTP 缓存');
+
     /* ================= 汇总 ================= */
     console.log('');
     console.log('======== 冒烟测试 ========');

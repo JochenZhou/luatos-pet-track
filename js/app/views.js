@@ -23,9 +23,18 @@
     view: ''
   };
 
+  /* 设备卡片 DOM 复用表：imei -> 节点。
+     卡片带 backdrop-filter 毛玻璃，整表 innerHTML 重建 = 合成层被反复销毁重建，
+     移动端就是肉眼可见的闪烁；这里跨轮次复用同一批节点，只改变化的文字/徽标。 */
+  var cardNodes = {};
+  /** 合并重绘句柄：一轮轮询会回调 7 次（N 台设备 + 缓存快照 + 收尾），只允许重绘 1 次 */
+  var cardsScheduled = null;
+
   function clearTimers() {
     state.timers.forEach(function (t) { clearInterval(t); clearTimeout(t); });
     state.timers = [];
+    if (cardsScheduled) { clearTimeout(cardsScheduled); cardsScheduled = null; }
+    cardNodes = {};            // 页面 DOM 已销毁，节点引用一并丢弃
   }
 
   function later(fn, ms) {
@@ -239,19 +248,47 @@
     // 先渲染缓存快照（消除「有数据→无数据」跳变）
     if (onAll) onAll(out);
     if (!toFetch.length) return;
+    /**
+     * 本轮没拿到定位时，沿用上一轮的有效数据；连上一轮都没有才返回 null（真·无定位）。
+     * 注意不要覆盖缓存、也不动 t —— 这样下一轮还会重试这台设备。
+     */
+    function keepPrevious(imei, name) {
+      var prev = state.statusCache[imei] && state.statusCache[imei].st;
+      if (!prev || !(prev.found || prev.lng !== undefined)) return null;
+      if (name) prev.name = name;
+      return prev;
+    }
+
     var remain = toFetch.length;
     toFetch.forEach(function (imei) {
       AC.getPetStatus(imei).then(function (st) {
         var p = PetStore.getOrCreate(imei);
         st.name = p.name;
+        // ⚠ 本轮没定位 ≠ 设备没有位置。
+        // getPetStatus 在定位请求失败（code!==0）时**不会 reject** —— AC.request 永不
+        // reject，异常统一 resolve 成 code:-102，于是这里拿到的是 found:false。
+        // 若直接把它当「无定位」写进缓存，设备列表就会在「有数据 ↔ 无数据」之间反复
+        // 横跳（实测 30% 失败率下 24 秒跳 6 次），这正是周总看到的闪烁。
+        // 只要上一轮有有效数据就沿用；设备真的失联会由 ts 老化成「离线」徽标。
+        if (!st.found) {
+          var prev = keepPrevious(imei, st.name);
+          if (prev) { out[imei] = prev; onOne && onOne(imei, prev); return; }
+        }
         out[imei] = st;
         state.statusCache[imei] = { st: st, t: Date.now() };
         // 新定位落持久化缓存：下次进页面秒显
         if (LocCache) LocCache.put(st);
         onOne && onOne(imei, st);
       })['catch'](function () {
-        out[imei] = { imei: imei, found: false, name: PetStore.nameOf(imei) };
-        state.statusCache[imei] = { st: out[imei], t: Date.now() };
+        // 抛异常这条路同样不能打回「无定位」（AC.request 永不 reject，此处仅兜底）
+        var prev = keepPrevious(imei, PetStore.nameOf(imei));
+        if (prev) {
+          out[imei] = prev;
+        } else {
+          out[imei] = { imei: imei, found: false, name: PetStore.nameOf(imei) };
+          state.statusCache[imei] = { st: out[imei], t: Date.now() };
+        }
+        onOne && onOne(imei, out[imei]);
       })['then'](function () {
         remain--;
         if (remain <= 0) onAll && onAll(out);
@@ -282,11 +319,20 @@
           document.getElementById('home-cards').innerHTML = '<div class="empty-card">暂无设备</div>';
           return;
         }
+        // 单台设备的回调不单独重绘列表：一轮 N 台设备就回调 N 次，
+        // 每次都重画一遍是「频繁闪烁」的另一半原因。这里合并成一次重绘。
+        function scheduleCardsPaint() {
+          if (cardsScheduled) return;
+          cardsScheduled = setTimeout(function () {
+            cardsScheduled = null;
+            renderHomeCards(devices, state.statuses);
+          }, 100);
+        }
         function refresh(force) {
           fetchAllStatuses(devices,
-            function (imei, st) {           // 单台完成：立即上屏
+            function (imei, st) {           // 单台完成：先更地图，列表合并重绘
               state.statuses[imei] = st;
-              renderHomeCards(devices, state.statuses);
+              scheduleCardsPaint();
               MapKit.upsertMarker(st);
             },
             function (statuses) {           // 缓存快照 / 全部完成
@@ -312,58 +358,112 @@
     return !!(st && st.vbat !== undefined && st.vbat !== null && Number(st.vbat) > 0 && Number(st.vbat) < CFG.VBAT_LOW_MV);
   }
 
+  /** 只在文字真变了才写 DOM，避免无谓的样式重算 */
+  function setText(node, s) {
+    if (!node) return;
+    s = (s === undefined || s === null) ? '' : String(s);
+    if (node.textContent !== s) node.textContent = s;
+  }
+
+  /** 单张设备卡片的骨架：节点只创建一次，之后只改文字/徽标（绝不整表重建） */
+  function makeCard(imei) {
+    var el = document.createElement('div');
+    el.className = 'pet-card';
+    el.setAttribute('data-imei', imei);
+    el.setAttribute('data-zoom', '15');
+    el.innerHTML =
+      '<div class="pc-head"><b></b><span class="pc-badges"></span></div>' +
+      '<div class="pc-sub"></div>' +
+      '<div class="pc-row">📍 <span class="v-loc"></span></div>' +
+      '<div class="pc-row pc-addr">🏷 <span class="v-addr"></span></div>' +
+      '<div class="pc-foot"><span class="v-foot"></span></div>';
+    el._v = {
+      name: el.querySelector('.pc-head b'),
+      badges: el.querySelector('.pc-badges'),
+      sub: el.querySelector('.pc-sub'),
+      loc: el.querySelector('.v-loc'),
+      addr: el.querySelector('.v-addr'),
+      foot: el.querySelector('.v-foot')
+    };
+    // hover 15 级 / click 18 级锁定（拉开差距，点击才「看得见」放大）
+    // 事件只绑一次：原来是每轮整表重建都重绑一遍，既浪费又打断 hover 状态
+    el.addEventListener('mouseenter', function () { MapKit.focusOn(imei, 15); });
+    el.addEventListener('click', function () {
+      if (!MapKit.canFocus(imei)) {
+        U.toast('「' + PetStore.nameOf(imei) + '」暂无定位，无法在地图上定位', 'err');
+        return;
+      }
+      MapKit.setLocked(imei);
+      MapKit.focusOn(imei, 18);
+      for (var k in cardNodes) cardNodes[k].classList.remove('locked');
+      el.classList.add('locked');
+    });
+    return el;
+  }
+
+  /** 把一份状态画到已存在的卡片节点上（只改真正变化的部分） */
+  function paintCard(el, st) {
+    var v = el._v;
+    var low = isLowBattery(st);
+    var offline = st.ts ? (Date.now() - st.ts > 5 * 60 * 1000) : !st.found;
+    var badge = st._pending ? '<span class="badge bad-load">加载中</span>'
+      : (st.found
+        ? (offline ? '<span class="badge bad-off">离线</span>' : '<span class="badge bad-on">在线</span>')
+        : '<span class="badge bad-off">无定位</span>');
+    // 来自持久化缓存的占位数据：明确标注「缓存」，新数据到达后该标记自然消失
+    var cachedBadge = st._cached ? '<span class="badge bad-load">缓存</span>' : '';
+    var lowBadge = low ? '<span class="badge bad-low">低电量</span>' : '';
+    var badges = cachedBadge + lowBadge + badge;
+    // 徽标只在内容真变了才重写：.bad-on::before 的呼吸动画会因 innerHTML 重写而从 0 帧重启
+    if (el._badgeSig !== badges) {
+      el._badgeSig = badges;
+      v.badges.innerHTML = badges;
+    }
+    setText(v.name, st.name);
+    setText(v.sub, st.imei);
+    setText(v.loc, (!st._pending && st.lng !== undefined)
+      ? (Number(st.lng).toFixed(5) + ', ' + Number(st.lat).toFixed(5)) : '--');
+    setText(v.addr, st.address ? st.address : '无地址信息');
+    var bat = (st.vbatPct !== undefined && st.vbatPct !== null) ? st.vbatPct + '%' : '--';
+    var sig = (st.signal !== undefined && st.signal !== null) ? (st.signal + ' ' + U.signalText(st.signal)) : '--';
+    var upTime = st.ts ? U.timeAgo(st.ts) : '--';
+    setText(v.foot, '🔋 ' + bat + (low ? ('（' + Number(st.vbat) + 'mV）') : '')
+      + ' · 📶 ' + sig + ' · 🕒 ' + upTime);
+    el.classList.toggle('pc-low', low);
+  }
+
+  /**
+   * 渲染设备卡片列表 —— **按键增量更新**，绝不给列表容器整体赋 innerHTML。
+   * 原因：卡片是毛玻璃（backdrop-filter），整表重建会让浏览器反复销毁/重建合成层，
+   * 移动端就是肉眼可见的闪烁；而一轮轮询要回调 7 次（N 台设备 + 缓存快照 + 收尾），
+   * 重建 7 次/10 秒足够看清。
+   */
   function renderHomeCards(devices, statuses) {
     var box = document.getElementById('home-cards');
     if (!box) return;
-    var html = devices.map(function (d) {
+    var seen = {};
+    devices.forEach(function (d, i) {
       var imei = d.deviceid;
-      var st = statuses[imei] || { imei: imei, name: PetStore.nameOf(imei), found: false };
+      if (!imei || seen[imei]) return;
+      seen[imei] = 1;
+      var el = cardNodes[imei];
+      if (!el) el = cardNodes[imei] = makeCard(imei);
+      // statuses 里还没这台设备 = 首轮请求尚未回来，显示「加载中」而不是「无定位」
+      var st = statuses[imei];
+      if (!st) st = { imei: imei, name: PetStore.nameOf(imei), found: false, _pending: true };
       if (!st.name) st.name = PetStore.nameOf(imei);
-      var offline = st.ts ? (Date.now() - st.ts > 5 * 60 * 1000) : !st.found;
-      var badge = st.found ? (offline ? '<span class="badge bad-off">离线</span>' : '<span class="badge bad-on">在线</span>') : '<span class="badge bad-off">无定位</span>';
-      // 来自持久化缓存的占位数据：明确标注「缓存」，新数据到达后该标记自然消失
-      var cachedBadge = st._cached ? '<span class="badge bad-load">缓存</span>' : '';
-      var loc = st.lng !== undefined ? (Number(st.lng).toFixed(5) + ', ' + Number(st.lat).toFixed(5)) : '--';
-      var addr = st.address ? U.esc(st.address) : '无地址信息';
-      var bat = (st.vbatPct !== undefined && st.vbatPct !== null) ? st.vbatPct + '%' : '--';
-      var sig = st.signal !== undefined && st.signal !== null ? (st.signal + ' ' + U.signalText(st.signal)) : '--';
-      var upTime = st.ts ? U.timeAgo(st.ts) : '--';
-      var low = isLowBattery(st);
-      var lowBadge = low ? '<span class="badge bad-low">低电量</span>' : '';
-      return '<div class="pet-card' + (low ? ' pc-low' : '') + '" data-imei="' + U.esc(imei) + '" data-zoom="15">' +
-        '<div class="pc-head"><b>' + U.esc(st.name) + '</b><span class="pc-badges">' + cachedBadge + lowBadge + badge + '</span></div>' +
-        '<div class="pc-sub">' + U.esc(imei) + '</div>' +
-        '<div class="pc-row">📍 ' + U.esc(loc) + '</div>' +
-        '<div class="pc-row pc-addr">🏷 ' + addr + '</div>' +
-        '<div class="pc-foot">🔋 ' + U.esc(bat) + (low ? ('（' + Number(st.vbat) + 'mV）') : '') + ' · 📶 ' + U.esc(sig) + ' · 🕒 ' + U.esc(upTime) + '</div>' +
-        '</div>';
-    }).join('');
-
-    // 保留滚动位置：轮询/流式刷新每 10s 重建一次 DOM，不保留会让移动端列表反复跳回顶部
-    var prevScroll = box.scrollTop;
-    box.innerHTML = html;
-    if (prevScroll) box.scrollTop = prevScroll;
-
-    // 锁定态需要跨重渲染保持，否则点击后的高亮会被下一次刷新抹掉
-    var lockedImei = MapKit.locked();
-
-    // hover 15 级 / click 18 级锁定（拉开差距，点击才「看得见」放大）
-    U.$all('.pet-card', box).forEach(function (card) {
-      var imei = card.getAttribute('data-imei');
-      if (lockedImei && imei === lockedImei) card.classList.add('locked');
-      card.addEventListener('mouseenter', function () {
-        MapKit.focusOn(imei, 15);
-      });
-      card.addEventListener('click', function () {
-        if (!MapKit.canFocus(imei)) {
-          U.toast('「' + PetStore.nameOf(imei) + '」暂无定位，无法在地图上定位', 'err');
-          return;
-        }
-        MapKit.setLocked(imei);
-        MapKit.focusOn(imei, 18);
-        U.$all('.pet-card', box).forEach(function (c) { c.classList.remove('locked'); });
-        card.classList.add('locked');
-      });
+      paintCard(el, st);
+      // 锁定态跨轮次保持，否则点击后的高亮会被下一次刷新抹掉
+      el.classList.toggle('locked', MapKit.locked() === imei);
+      // 只有位置不对才移动节点（移动已有节点不会重建它）
+      if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+    });
+    // 清掉已不在列表里的卡片（换项目 / 删设备）
+    Object.keys(cardNodes).forEach(function (imei) {
+      if (seen[imei]) return;
+      var el = cardNodes[imei];
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      delete cardNodes[imei];
     });
   }
 

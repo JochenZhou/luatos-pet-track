@@ -14,6 +14,12 @@
   var LOGIN_PAGE = 'login.html';
   var APP_PAGE = 'index.html';
 
+  // 构建号：必须与 android/app/build.gradle 的 versionName 保持一致（冒烟 T126 校验）。
+  // 用途：登录页 ↔ 业务页跳转时带上 ?v=BUILD，逼浏览器/WebView 丢掉旧副本。
+  // 合宙平台只给 HTML 加 Last-Modified、没有 Cache-Control，改完页面不换 URL
+  // 用户就会一直看到缓存里的旧版（曾出现「登录按钮已改青色，用户仍看到蓝色」）。
+  var BUILD = '0.4.5';
+
   // appId 兜底常量：部署时优先从 URL /ai_app/luatos/{appId}/ 提取，取不到回退本值
   var FALLBACK_APP_ID = 'move';
 
@@ -106,6 +112,7 @@
     API_BASE: API_BASE,
     LOGIN_PAGE: LOGIN_PAGE,
     APP_PAGE: APP_PAGE,
+    BUILD: BUILD,
     OAUTH_URL: API_HOST + '/iam/luat_oauth/authorize',
     LOGIN_API: API_HOST + '/iam/luat_oauth/v2/login',
     FALLBACK_APP_ID: FALLBACK_APP_ID,

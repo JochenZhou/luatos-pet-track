@@ -207,17 +207,27 @@
   }
 
   /**
+   * 给内部跳转 URL 拼上构建号，绕开浏览器/WebView 对 HTML 的缓存。
+   * 合宙平台只发 Last-Modified、不发 Cache-Control，URL 不变就会一直复用旧副本
+   * （曾导致「登录页按钮已改青色，用户仍看到蓝色」）。见 CFG.BUILD。
+   */
+  function withBuild(url) {
+    if (!CFG.BUILD) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'v=' + CFG.BUILD;
+  }
+
+  /**
    * 跳登录页（BASE_HOST 前缀完整绝对 URL，可携带安全 returnTo）
    */
   function redirectToLogin(returnTo) {
-    var target = CFG.BASE_HOST + '/ai_app/luatos/' + U.extractAppId() + '/' + CFG.LOGIN_PAGE;
+    var target = withBuild(CFG.BASE_HOST + '/ai_app/luatos/' + U.extractAppId() + '/' + CFG.LOGIN_PAGE);
     var rt = safeReturnTo(returnTo);
-    if (rt) target += '?returnTo=' + encodeURIComponent(rt);
+    if (rt) target += '&returnTo=' + encodeURIComponent(rt);   // withBuild 已占用 '?'
     try { global.location.replace(target); } catch (e) { /* ignore */ }
   }
 
   function redirectToApp() {
-    var target = CFG.BASE_HOST + '/ai_app/luatos/' + U.extractAppId() + '/' + CFG.APP_PAGE;
+    var target = withBuild(CFG.BASE_HOST + '/ai_app/luatos/' + U.extractAppId() + '/' + CFG.APP_PAGE);
     try { global.location.replace(target); } catch (e) { /* ignore */ }
   }
 
