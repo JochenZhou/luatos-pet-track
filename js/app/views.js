@@ -48,6 +48,59 @@
     return t;
   }
 
+  /**
+   * 进度条控制器：绑定容器内的 .tr-fill / .tr-text（轨迹回放与日报共用同一套样式）。
+   *
+   * 大范围历史查询本来就慢（location_history / list_by_tags 要翻很多页，耗时随页数增长），
+   * 界面必须持续给出「还在动」的证据：百分比 + 已用秒数。否则用户只会以为网页卡死了。
+   *
+   * @param host 容器元素或 id
+   * @returns {{set:function(number,string), text:function(string), elapsed:function():number}}
+   */
+  function progressCtl(host) {
+    var el = typeof host === 'string' ? document.getElementById(host) : host;
+    var fill = el ? el.querySelector('.tr-fill') : null;
+    var text = el ? el.querySelector('.tr-text') : null;
+    var t0 = Date.now();
+    var cur = { pct: 0, label: '正在加载…' };
+
+    function paint() {
+      if (fill) fill.style.width = cur.pct + '%';
+      if (text) {
+        text.textContent = cur.label + ' ' + cur.pct.toFixed(0) + '% · 已用 ' +
+          ((Date.now() - t0) / 1000).toFixed(1) + 's';
+      }
+    }
+
+    // 每 400ms 自己刷一次「已用秒数」：某些阶段（例如并发翻页全部在途）
+    // 进度回调可能几秒才来一次，光靠回调刷新会让人以为数字冻住了。
+    var ticker = setInterval(function () {
+      if (!el || !el.isConnected) { clearInterval(ticker); return; }
+      paint();
+    }, 400);
+
+    return {
+      set: function (pct, label) {
+        cur.pct = Math.max(0, Math.min(100, Number(pct) || 0));
+        if (label) cur.label = label;
+        paint();
+      },
+      text: function (s) { cur.label = s; paint(); },
+      elapsed: function () { return (Date.now() - t0) / 1000; },
+      /** 收尾：进度拉满 + 显示一行结果摘要（例如「已剔除 N 个异常跳点」） */
+      done: function (msg) {
+        clearInterval(ticker);
+        cur.pct = 100;
+        if (fill) fill.style.width = '100%';
+        if (text) {
+          text.textContent = (msg || '完成') + ' · 耗时 ' +
+            ((Date.now() - t0) / 1000).toFixed(1) + 's';
+        }
+      },
+      stop: function () { clearInterval(ticker); }
+    };
+  }
+
   /* ================= 外壳 ================= */
 
   var SHELL_HTML =
@@ -906,6 +959,7 @@
   var Views = {
     state: state,
     clearTimers: clearTimers,
+    progressCtl: progressCtl,
     showLoading: showLoading,
     hideLoading: hideLoading,
     buildShell: buildShell,

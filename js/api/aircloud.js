@@ -322,6 +322,30 @@
 
   /* ================= 业务接口 ================= */
 
+  /**
+   * 限并发任务池：把 items 交给 worker，同时在跑的不超过 limit 个。
+   * 单个任务失败不中断整体 —— 翻页场景下某一页偶尔超时不该让整条轨迹落空，
+   * 所以这里吞掉异常，由 worker 自己决定返回什么。
+   */
+  function runPool(items, limit, worker) {
+    return new Promise(function (resolve) {
+      var n = items.length;
+      if (!n) return resolve();
+      var i = 0, running = 0, done = 0;
+      function next() {
+        while (running < limit && i < n) {
+          running++;
+          worker(items[i++]).then(function () { }, function () { }).then(function () {
+            running--;
+            done++;
+            if (done >= n) resolve(); else next();
+          });
+        }
+      }
+      next();
+    });
+  }
+
   function listMyProjects() {
     return request('/list_my_projects', {}, { tag: 'projects' });
   }
@@ -376,39 +400,61 @@
 
   /**
    * 自动翻页拉全量（ct 升序），opts.onProgress(n, total)
+   *
+   * 【并行翻页】原实现是 page1 → page2 → … 的串行递归，N 页就要等 N 个 RTT。
+   * 长时段查询时几秒的等待全花在「请求往返」上，而不是平台上。现改为：
+   * 先取第 1 页拿到 total，剩余页并发拉取（默认 4 并发，避免触发平台限流），
+   * 耗时降到 1~2 个 RTT 量级。**请求数不变，只是不再排队等**。
+   *
+   * 合并后统一按 ct 升序排序 —— 串行时代靠「跟前一条比较再 reverse 本页」的补丁
+   * 维持顺序，并发下页完成顺序不定，该补丁失效，必须整体排序。
    */
   function fetchAllByTags(clientId, tags, filter, opts) {
     opts = opts || {};
     var clean = sanitizeTags(tags, true);
+    if (tags && tags.length && !clean.length) return Promise.resolve([]);
     var collected = [];
-    var total = 0;
-    var page = 1;
     var size = CFG.LIST_MAX_SIZE;
-    var guard = 100;
-    function pageFetch() {
-      if (guard-- <= 0) return Promise.resolve(collected);
-      return listByTags(clientId, clean, page, size, filter).then(function (res) {
-        if (res.code !== 0) return collected;
-        var v = res.value || {};
-        if (!v.records || !v.records.length) return collected;
-        var arr = v.records.slice();
-        total = Number(v.total) || arr.length;
-        // 平台恒 ct 降序；本函数返回升序
-        var prev = collected[collected.length - 1];
-        var first = arr[0];
-        if (prev && first && U.recTs(prev) > U.recTs(first)) arr.reverse();
-        collected = collected.concat(arr);
-        if (opts.onProgress) {
-          try { opts.onProgress(collected.length, total); } catch (e) { /* ignore */ }
-        }
-        if (collected.length >= total || arr.length < size || Number(v.current) >= Number(v.pages)) {
-          return collected;
-        }
-        page++;
-        return pageFetch();
-      });
+    var maxPages = opts.maxPages > 0 ? opts.maxPages : 100;
+    var conc = opts.concurrency > 0 ? opts.concurrency : 4;
+
+    function fetchPage(p) {
+      return listByTags(clientId, clean, p, size, filter).then(function (res) {
+        var v = (res && res.value) || {};
+        return {
+          records: (res && res.code === 0 && v.records) ? v.records.slice() : [],
+          total: Number(v.total) || 0
+        };
+      })['catch'](function () { return { records: [], total: 0 }; });
     }
-    return pageFetch();
+
+    function report(total) {
+      if (opts.onProgress) {
+        try { opts.onProgress(collected.length, total || collected.length); } catch (e) { /* ignore */ }
+      }
+    }
+
+    function finish() {
+      collected.sort(function (a, b) { return U.recTs(a) - U.recTs(b); });
+      return collected;
+    }
+
+    return fetchPage(1).then(function (r1) {
+      collected = collected.concat(r1.records);
+      report(r1.total);
+      if (!r1.records.length) return finish();
+      var total = r1.total || collected.length;
+      var pages = Math.min(maxPages, Math.ceil(total / size));
+      if (pages <= 1) return finish();
+      var rest = [];
+      for (var p = 2; p <= pages; p++) rest.push(p);
+      return runPool(rest, conc, function (p) {
+        return fetchPage(p).then(function (r) {
+          if (r.records.length) collected = collected.concat(r.records);
+          report(total);
+        });
+      }).then(finish);
+    });
   }
 
   function latestLocation(clientId) {
@@ -435,40 +481,75 @@
   function getTrack(clientId, start, end, opts) {
     opts = opts || {};
 
-    /* --- 1) location_history 自动翻页 --- */
+    /* --- 进度：两条链路的完成比例加权成一条单调上升的总进度 --- */
+    // history 与 tags 并行推进，各自算完成比例，总进度 = 35% × history + 65% × tags
+    // （tags 的数据量级大得多，给更高权重）。回调前两个参数仍是 (loaded, total)
+    // 以兼容旧调用，第三个参数 info 带总体百分比与阶段，供进度条使用。
+    var hRatio = 0, tRatio = 0;
+    function emit(phase, loaded, total) {
+      if (!opts.onProgress) return;
+      var pct = Math.round((hRatio * 35 + tRatio * 65) * 10) / 10;
+      try { opts.onProgress(loaded, total, { pct: pct, phase: phase }); } catch (e) { /* ignore */ }
+    }
+
+    /* --- 1) location_history 自动翻页（第 1 页拿 total → 剩余页并发） --- */
     function fetchHistory() {
       var all = [];
-      var page = 1;
-      var guard = 60;   // 安全上限，防后端 total 异常导致死循环
-      function step() {
-        if (guard-- <= 0) return Promise.resolve(all);
+      var maxPages = 60;   // 安全上限，防后端 total 异常导致死循环 / 狂发请求
+      var conc = 4;
+
+      function fetchPage(p) {
         return request('/aircloud/location_history', {
-          client_id: clientId, start: start, end: end, page: page, size: CFG.LIST_MAX_SIZE
+          client_id: clientId, start: start, end: end, page: p, size: CFG.LIST_MAX_SIZE
         }, { tag: 'history' }).then(function (res) {
-          if (res.code !== 0) return all;
-          var recs = (res.value && res.value.records) || [];
-          if (!recs.length) return all;
-          all = all.concat(recs);
-          var total = Number(res.value.total) || all.length;
-          if (all.length >= total || recs.length < CFG.LIST_MAX_SIZE) return all;
-          page++;
-          return step();
-        });
+          var v = (res && res.value) || {};
+          return {
+            records: (res && res.code === 0 && v.records) ? v.records.slice() : [],
+            total: Number(v.total) || 0
+          };
+        })['catch'](function () { return { records: [], total: 0 }; });
       }
-      return step();
+
+      function report(total) {
+        hRatio = total > 0 ? Math.min(1, all.length / total) : 1;
+        emit('history', all.length, total || all.length);
+      }
+
+      return fetchPage(1).then(function (r1) {
+        all = all.concat(r1.records);
+        var total = r1.total || all.length;
+        report(total);
+        if (!r1.records.length) { hRatio = 1; return all; }
+        var pages = Math.min(maxPages, Math.ceil(total / CFG.LIST_MAX_SIZE));
+        if (pages <= 1) { hRatio = 1; report(total); return all; }
+        var rest = [];
+        for (var p = 2; p <= pages; p++) rest.push(p);
+        return runPool(rest, conc, function (p) {
+          return fetchPage(p).then(function (r) {
+            if (r.records.length) all = all.concat(r.records);
+            report(total);
+          });
+        }).then(function () { hRatio = 1; report(total); return all; });
+      });
     }
 
     function historyToPoints(recs) {
       var out = [];
+      var prevTs = 0;
       (recs || []).forEach(function (r) {
         var t = r.time || r.ct;
         var lng = Number(r.lng), lat = Number(r.lat);
         if (!isFinite(lng) || !isFinite(lat)) return;
+        var d = U.parseLocalTime(t);
+        var ms = d ? d.getTime() : 0;
         out.push({
           lng: lng, lat: lat, wlng: Number(r.wlng), wlat: Number(r.wlat),
-          time: t, ts: U.parseLocalTime(t) ? U.parseLocalTime(t).getTime() : 0,
+          time: t, ts: ms,
+          // 到上一条定位记录的真实间隔（秒），供异常点剔除算速度用
+          dtPrev: (ms && prevTs && ms > prevTs) ? (ms - prevTs) / 1000 : 0,
           source: 'history', coord: CFG.COORD_GCJ02
         });
+        if (ms) prevTs = ms;
       });
       return out;
     }
@@ -479,7 +560,7 @@
      * 子样本时间以记录时间为基准做 1ms 递增：既保证排序稳定，又不猜测报文时间窗方向，
      * 避免不同上报周期下时间窗重叠导致折线来回穿插。
      */
-    function recToPoints(r, fallbackLng, fallbackLat) {
+    function recToPoints(r, fallbackLng, fallbackLat, prevRecTs) {
       var rawLng = recVal(r, 512);
       var rawLat = recVal(r, 513);
       var okLng = (rawLng !== undefined && rawLng !== null && rawLng !== '') && isFinite(Number(rawLng));
@@ -493,6 +574,12 @@
       var ts = U.recTs(r);
       var out = [];
 
+      // 本条记录距上一条记录的真实间隔（秒）：1294 一包 10 样本、约 1s 一个，
+      // 所以本包第一个样本跨的是记录间隔，包内其余样本各差 1s。
+      // 这个 dtPrev 专供异常点剔除算速度用 —— 包内样本的 ts 只差 1ms（为了排序稳定），
+      // 直接拿 ts 相减会把正常行走算成几千公里每秒。
+      var gapSec = (prevRecTs && ts && ts > prevRecTs) ? (ts - prevRecTs) / 1000 : 0;
+
       // 优先展开 1294 精细点
       var hex = recVal(r, 1294);
       if (hasRef && typeof hex === 'string' && hex.replace(/[^0-9a-fA-F]/g, '').length >= 20) {
@@ -505,6 +592,7 @@
             out.push({
               lng: s.lng, lat: s.lat,
               time: r.ct || r.time || '', ts: ts + i,
+              dtPrev: i === 0 ? gapSec : 1,
               source: 'gnss', coord: CFG.COORD_GCJ02, rec: r,
               speed: s.speed, speedKmh: s.speedKmh, course: s.course, altitude: s.altitude
             });
@@ -517,43 +605,74 @@
       if (okLng && okLat) {
         out.push({
           lng: Number(rawLng), lat: Number(rawLat),
-          time: r.ct, ts: ts,
+          time: r.ct, ts: ts, dtPrev: gapSec,
           source: 'tags', coord: coord, rec: r
         });
       }
       return out;
     }
 
-    return fetchHistory().then(function (histRecs) {
-      var histPoints = historyToPoints(histRecs);
-      var filter = { aks: ['ct', 'ct'], acs: ['ge', 'le'], avs: [start, end] };
-      return fetchAllByTags(clientId, CFG.TRACK_TAGS, filter, {
-        onProgress: opts.onProgress
-      }).then(function (recs) {
-        var tagPoints = [];
-        var lastLng = null, lastLat = null;
-        (recs || []).forEach(function (r) {
-          if (!U.recTs(r)) return;
-          var pts = recToPoints(r, lastLng, lastLat);
-          for (var i = 0; i < pts.length; i++) {
-            tagPoints.push(pts[i]);
-            lastLng = pts[i].lng;
-            lastLat = pts[i].lat;
-          }
-        });
-        // 合并 + 升序去重
-        var merged = histPoints.concat(tagPoints).sort(function (a, b) { return a.ts - b.ts; });
-        var out = [];
-        var lastKey = null;
-        for (var i = 0; i < merged.length; i++) {
-          var p = merged[i];
-          var key = p.lng + ',' + p.lat;
-          if (key === lastKey) continue;
-          lastKey = key;
-          out.push(p);
+    var filter = { aks: ['ct', 'ct'], acs: ['ge', 'le'], avs: [start, end] };
+
+    // 两条链路互相独立：**并行**发起。原来是 history 全翻完才开始 tags，
+    // 等于把两串请求排队相加，白白多等一轮。
+    var histP = fetchHistory();
+
+    var tagsP = fetchAllByTags(clientId, CFG.TRACK_TAGS, filter, {
+      onProgress: function (n, total) {
+        tRatio = total > 0 ? Math.min(1, n / total) : (n > 0 ? 1 : 0);
+        emit('tags', n, total);
+      }
+    }).then(function (rs) {
+      tRatio = 1;
+      emit('tags', (rs || []).length, (rs || []).length);
+      return rs;
+    });
+
+    return Promise.all([histP, tagsP]).then(function (rs) {
+      var histPoints = historyToPoints(rs[0] || []);
+      var recs = rs[1] || [];
+      var tagPoints = [];
+      var lastLng = null, lastLat = null;
+      var prevRecTs = 0;
+      (recs || []).forEach(function (r) {
+        var rts = U.recTs(r);
+        if (!rts) return;
+        var pts = recToPoints(r, lastLng, lastLat, prevRecTs);
+        prevRecTs = rts;
+        for (var i = 0; i < pts.length; i++) {
+          tagPoints.push(pts[i]);
+          lastLng = pts[i].lng;
+          lastLat = pts[i].lat;
         }
-        return out;
       });
+
+      // 合并 + 升序去重
+      var merged = histPoints.concat(tagPoints).sort(function (a, b) { return a.ts - b.ts; });
+      var out = [];
+      var lastKey = null;
+      for (var i = 0; i < merged.length; i++) {
+        var p = merged[i];
+        var key = p.lng + ',' + p.lat;
+        if (key === lastKey) continue;
+        lastKey = key;
+        out.push(p);
+      }
+
+      // 异常点剔除：太跳跃的点直接抛弃。放在这里而不是各调用方，
+      // 日报（里程统计）与轨迹回放（画折线）就都吃到同一层清洗。
+      var Alg = global.Algo;
+      var st = {};
+      var cleaned = (Alg && Alg.filterTrackOutliers) ? Alg.filterTrackOutliers(out, {}, st) : out;
+      cleaned.removedOutliers = st.dropped || 0;
+
+      if (opts.onProgress) {
+        try {
+          opts.onProgress(cleaned.length, cleaned.length,
+            { pct: 100, phase: 'done', dropped: cleaned.removedOutliers });
+        } catch (e) { /* ignore */ }
+      }
+      return cleaned;
     });
   }
 

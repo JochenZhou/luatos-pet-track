@@ -276,6 +276,93 @@ return AC.request('/list_my_projects', {}).then(r => {
       }
     })) });
   };
+  /* ---------- 结果汇总 ---------- */
+  function summarize() {
+    console.log('');
+    console.log('======== 冒烟测试 ========');
+    console.log('通过: ' + pass + ' / ' + (pass + fail));
+    if (fail > 0) {
+      console.log('失败项：');
+      failures.forEach(f => console.log('  ✗ ' + f));
+      process.exit(1);
+    } else {
+      console.log('全部通过 ✓');
+    }
+  }
+
+  /* ---------- 并行翻页 / 阶段进度（多页 stub） ----------
+     请求数不变、只是不再排队等，所以这里同时验「页数全取到」和「在途峰值 > 1」。 */
+  function parallelChecks() {
+    storeMap['my_auth'] = JSON.stringify({ token: 'TK9', salt: 'S9' });
+    storeMap['my_service'] = JSON.stringify({ sid: 'SID9' });
+
+    let inflight = 0, peak = 0;
+    const calls = [];
+    fetchImpl = (url, opts) => {
+      const body = JSON.parse((opts && opts.body) || '{}');
+      const isHist = url.indexOf('location_history') >= 0;
+      const page = Number(body.page) || 1;
+      const size = Number(body.size) || 100;
+      calls.push((isHist ? 'h' : 't') + page);
+      inflight++;
+      if (inflight > peak) peak = inflight;
+      const total = 500;
+      const n = Math.max(0, Math.min(size, total - (page - 1) * size));
+      const records = [];
+      for (let i = 0; i < n; i++) {
+        const k = (page - 1) * size + i;
+        const t = '2026-09-10 00:' + String(Math.floor(k / 60) % 60).padStart(2, '0') + ':' + String(k % 60).padStart(2, '0');
+        records.push(isHist
+          ? { lng: 104.0 + k * 1e-5, lat: 30.0 + k * 1e-5, time: t }
+          : { ct: t, val_512: 104.0 + k * 1e-5, val_513: 30.0 + k * 1e-5 });
+      }
+      return new Promise(resolve => {
+        setTimeout(() => {
+          inflight--;
+          resolve({
+            text: () => Promise.resolve(JSON.stringify({
+              code: 0,
+              value: { total: String(total), current: page, pages: Math.ceil(total / size), records }
+            }))
+          });
+        }, 25);
+      });
+    };
+
+    const seen = [];
+    const filter = { aks: ['ct', 'ct'], acs: ['ge', 'le'], avs: ['2026-09-10 00:00:00', '2026-09-10 23:59:59'] };
+    function timedTags(conc) {
+      const t0 = Date.now();
+      return AC.fetchAllByTags('861234567890123', [513], filter, { concurrency: conc })
+        .then(() => Date.now() - t0);
+    }
+
+    return AC.getTrack('861234567890123', '2026-09-10 00:00:00', '2026-09-10 23:59:59', {
+      onProgress: (n, total, info) => { if (info) seen.push(info); }
+    }).then(pts => {
+      const h = calls.filter(c => c[0] === 'h');
+      const t = calls.filter(c => c[0] === 't');
+      ok(h.length === 5, 'T139 location_history 5 页全部取到 (got ' + h.length + ')');
+      ok(t.length === 5, 'T140 list_by_tags 5 页全部取到 (got ' + t.length + ')');
+      ok(peak >= 3, 'T141 翻页确实并发（在途峰值 ' + peak + '）—— 串行实现峰值恒为 1');
+      const phases = [...new Set(seen.map(s => s.phase))].sort();
+      ok(phases.indexOf('history') >= 0 && phases.indexOf('tags') >= 0,
+        'T142 进度回调覆盖 history 与 tags 两阶段 [' + phases.join(',') + ']');
+      let mono = seen.length > 0;
+      for (let i = 1; i < seen.length; i++) if (seen[i].pct < seen[i - 1].pct - 0.01) mono = false;
+      ok(mono && seen[seen.length - 1].pct === 100,
+        'T143 总进度单调不减且收尾 100%（' + seen.length + ' 次回调）');
+      ok(pts.length > 0 && typeof pts.removedOutliers === 'number',
+        'T144 getTrack 返回带 removedOutliers（已剔除异常点数=' + pts.removedOutliers + '）');
+
+      // 耗时对照：同样 5 页、每页固定 25ms，串行要等 5 个往返，并发只要 2 个
+      return timedTags(1).then(tSerial => timedTags(4).then(tConc => {
+        ok(tConc < tSerial * 0.75,
+          'T145 同样 5 页：并发 ' + tConc + 'ms < 串行 ' + tSerial + 'ms（≤75%）');
+      }));
+    });
+  }
+
   return AC.getTrack('861234567890123', '2026-09-10 00:00:00', '2026-09-10 23:59:59', {}).then(pts => {
     const gnss = pts.filter(p => p.source === 'gnss');
     ok(gnss.length === 10, 'T67 1294 展开为 10 个精细点 (got ' + gnss.length + ')');
@@ -571,18 +658,69 @@ return AC.request('/list_my_projects', {}).then(r => {
       && javaText.indexOf('import android.content.SharedPreferences;') > 0,
       'T129 Android 加载 URL 带版本号 + 换版本清 HTTP 缓存');
 
-    /* ================= 汇总 ================= */
-    console.log('');
-    console.log('======== 冒烟测试 ========');
-    console.log('通过: ' + pass + ' / ' + (pass + fail));
-    if (fail > 0) {
-      console.log('失败项：');
-      failures.forEach(f => console.log('  ✗ ' + f));
-      process.exit(1);
-    } else {
-      console.log('全部通过 ✓');
+    /* ================= 轨迹异常点剔除（太跳跃的点直接抛弃） ================= */
+    const D_LAT = 10 / 111320;   // 向北 10m
+    const D_LNG = 10 / 96486;    // 北纬 30° 向东 10m
+    const mkPt = (lng, lat, i, dtPrev) =>
+      ({ lng, lat, ts: 1000000 + i * 10000, dtPrev: dtPrev === undefined ? (i ? 10 : 0) : dtPrev });
+
+    // 正常行走：每 10s 走 10m（1m/s）
+    const walkPts = [];
+    for (let i = 0; i < 6; i++) walkPts.push(mkPt(104.0, 30.0 + i * D_LAT, i));
+    const walkKept = Algo.filterTrackOutliers(walkPts, {}, {});
+    ok(walkKept.length === 6, 'T130 正常行走轨迹一点不删 (got ' + walkKept.length + '/6)');
+
+    // 单点漂移：中间插一个偏东约 1000m 的点，前后都正常
+    const driftPts = walkPts.slice();
+    driftPts.splice(3, 0, { lng: 104.0 + 1000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 5 });
+    const driftStat = {};
+    const driftKept = Algo.filterTrackOutliers(driftPts, {}, driftStat);
+    ok(driftKept.length === 6 && driftStat.dropped === 1,
+      'T131 单点漂移（约 1000m/5s）被剔除，其余保留 (kept=' + driftKept.length + ' dropped=' + driftStat.dropped + ')');
+
+    // 整包偏移：某条记录参考点取错，连着 5 个点整体偏出去 1.5km
+    const bulkPts = [];
+    for (let i = 0; i < 3; i++) bulkPts.push(mkPt(104.0, 30.0 + i * D_LAT, i));
+    for (let i = 0; i < 5; i++) bulkPts.push(mkPt(104.0 + 1500 / 96486, 30.0 + (3 + i) * D_LAT, 3 + i));
+    const bulkStat = {};
+    const bulkKept = Algo.filterTrackOutliers(bulkPts, {}, bulkStat);
+    ok(bulkKept.length === 3 && bulkStat.dropped === 5,
+      'T132 整包偏移连着 5 个点一起丢，不留半截飞出去的线段 (kept=' + bulkKept.length + ')');
+
+    // 1294 包内 10 个样本：ts 只差 1ms，实际是 1s 一个 —— 必须靠 dtPrev 判定
+    const pktPts = [];
+    for (let i = 0; i < 10; i++) {
+      pktPts.push({ lng: 104.0, lat: 30.0 + i / 111320, ts: 5000 + i, dtPrev: i ? 1 : 0 });
     }
-  });
+    const pktKept = Algo.filterTrackOutliers(pktPts, {}, {});
+    ok(pktKept.length === 10, 'T133 1294 包内 1ms 时间戳不被误判为瞬移 (kept=' + pktKept.length + '/10)');
+    // 反向对照：去掉 dtPrev 后同一批点确实会被误删 —— 证明该字段不是可选项
+    const noHintKept = Algo.filterTrackOutliers(pktPts.map(p => ({ lng: p.lng, lat: p.lat, ts: p.ts })), {}, {});
+    ok(noHintKept.length < 10, 'T134 反向对照：缺 dtPrev 时确实误删 (kept=' + noHintKept.length + '/10)');
+
+    /* ================= 日报 / 回放：耗时与反馈的源码级约束 ================= */
+    const v2Text = fs.readFileSync(path.join(ROOT, 'js/app/views2.js'), 'utf8');
+    const v3Text = fs.readFileSync(path.join(ROOT, 'js/app/views3.js'), 'utf8');
+    const acText = fs.readFileSync(path.join(ROOT, 'js/api/aircloud.js'), 'utf8');
+    // 日报原来跑两次完整 getTrack（当天 + 近 7 天），7 天那次的 location_history 翻页
+    // 是「生成很慢、网络里一堆 location_history」的主因；现在只用轻量 513 记录算打卡
+    const gtCount = (v3Text.match(/AC\.getTrack\(/g) || []).length;
+    ok(gtCount === 1, 'T135 日报只跑一次 getTrack（原来两次）[got ' + gtCount + ']');
+    ok(v3Text.indexOf('id="rp-progress"') > 0 && v3Text.indexOf('Views.progressCtl') > 0,
+      'T136 日报有进度条（长查询不再是「黑屏等」）');
+    ok(v2Text.indexOf('Views.progressCtl(prog)') > 0
+      && v2Text.indexOf("info.phase === 'history'") > 0,
+      'T137 轨迹回放进度条覆盖 history 阶段（原来该阶段完全没有反馈）');
+    ok(viewsText.indexOf('function progressCtl(host)') > 0
+      && viewsText.indexOf('progressCtl: progressCtl') > 0,
+      'T138 通用进度条控制器已挂到 Views');
+    ok(acText.indexOf('runPool(') > 0 && acText.indexOf('page++;') < 0,
+      'T139 翻页改为并发（存在 runPool，串行 step 递归已移除）');
+    ok(acText.indexOf('Alg.filterTrackOutliers') > 0,
+      'T140 getTrack 出口统一做异常点剔除（日报与回放共用）');
+
+    return parallelChecks();
+  }).then(summarize);
 })['catch'](e => {
   console.error('测试执行异常：', e);
   process.exit(1);

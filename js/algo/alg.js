@@ -72,6 +72,70 @@
 
   A.detectFall = detectFall;
 
+  /* ================= 轨迹异常点剔除 ================= */
+
+  /** 两点球面距离（米）—— 仅用于轨迹判定，不对外承诺坐标语义 */
+  function distM(lng1, lat1, lng2, lat2) {
+    var R = 6371000;
+    var dLat = (lat2 - lat1) * Math.PI / 180;
+    var dLng = (lng2 - lng1) * Math.PI / 180;
+    var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  /**
+   * 轨迹异常点剔除：太跳跃的点直接抛弃。
+   *
+   * 为什么需要：定位漂移（尤其 1294 差分展开时该记录参考点取错）会让折线上突然
+   * 拉出一条远超正常范围的长直线再弹回来，肉眼看着像「瞬移」；日报里还会把里程
+   * 算爆、把最远点算错。
+   *
+   * 判定基准是「锚点」= 上一个**保留**的点，锚点只在保留时前移：
+   *   - 速度判据：距离 / 时间间隔 > maxSpeed(m/s) → 跳点
+   *   - 绝对判据：距离 > maxJump(m)               → 跳点
+   * 用锚点而不是「前一个点」是关键：一整包都偏出去时，包首点被丢后锚点原地不动，
+   * 包内其余点同样判定超限 → **整包一起丢**，不会留下半截飞出去再飞回来的线段。
+   *
+   * 时间间隔优先取 p.dtPrev：1294 包内 10 个样本是 10s/10=1s 一个，跨记录取真实
+   * 上报间隔。**不能**直接拿 p.ts 相减 —— 包内 ts 只差 1ms（那是为了让排序稳定
+   * 才这么排的），拿它算速度会把正常行走全部判成瞬移。
+   *
+   * @param points 按时间升序的轨迹点
+   * @param opts   { maxSpeed:33.3, maxJump:5000 }  33.3m/s 与日报 trackStats 的判据保持一致
+   * @param stats  可选，回填 { dropped, kept }
+   * @returns 剔除后的新数组（不修改入参）
+   */
+  function filterTrackOutliers(points, opts, stats) {
+    opts = opts || {};
+    var maxSpeed = opts.maxSpeed > 0 ? opts.maxSpeed : 33.3;
+    var maxJump = opts.maxJump > 0 ? opts.maxJump : 5000;
+    var dropped = 0;
+    var out = [];
+    if (points && points.length) {
+      var anchor = null;
+      for (var i = 0; i < points.length; i++) {
+        var p = points[i];
+        if (!p || !isFinite(p.lng) || !isFinite(p.lat)) { dropped++; continue; }
+        if (!anchor) { out.push(p); anchor = p; continue; }
+        var d = distM(anchor.lng, anchor.lat, p.lng, p.lat);
+        if (d > maxJump) { dropped++; continue; }
+        var dt = (typeof p.dtPrev === 'number' && p.dtPrev > 0)
+          ? p.dtPrev
+          : ((p.ts && anchor.ts && p.ts > anchor.ts) ? (p.ts - anchor.ts) / 1000 : 0);
+        if (dt > 0 && d / dt > maxSpeed) { dropped++; continue; }
+        out.push(p);
+        anchor = p;
+      }
+    }
+    if (stats) { stats.dropped = dropped; stats.kept = out.length; }
+    return out;
+  }
+
+  A.distM = distM;
+  A.filterTrackOutliers = filterTrackOutliers;
+
   // 暴露版本与坐标转换快捷方法（保证聚合后都存在）
   A.VERSION = '0.3';
 })(window);

@@ -76,20 +76,25 @@
       MapKit.create('track-map', { center: [30.65, 104.06], zoom: 5 });
       MapKit.clearTemp();
       var prog = document.getElementById('tr-progress');
-      var fill = prog.querySelector('.tr-fill');
-      var ptext = prog.querySelector('.tr-text');
       prog.classList.remove('hidden');
       document.getElementById('tr-play').disabled = true;
+      // 长时段轨迹本来就慢（要翻很多页），进度条 + 已用秒数让「在加载」和「卡死」可区分。
+      // 此前进度只反映 list_by_tags 这一段，而先跑的 location_history 翻页完全没有反馈，
+      // 用户看到的是一条一直空着不动的进度条。
+      var pc = Views.progressCtl(prog);
+      pc.set(0, '正在拉取定位记录…');
       AC.getTrack(imeiSel, s, e, {
-        onProgress: function (n, total) {
-          var pct = total > 0 ? Math.min(100, Math.round(n / total * 100)) : 100;
-          fill.style.width = pct + '%';
-          ptext.textContent = '已加载 ' + n + ' / ' + (total || n) + ' 条';
+        onProgress: function (n, total, info) {
+          var pct = (info && typeof info.pct === 'number') ? info.pct
+            : (total > 0 ? Math.min(100, n / total * 100) : 0);
+          var label = (info && info.phase === 'history') ? '正在拉取定位记录…'
+            : (info && info.phase === 'tags') ? '正在解析轨迹…' : '正在整理轨迹…';
+          pc.set(pct, label);
         }
       }).then(function (points) {
-        prog.classList.add('hidden');
         trData.points = points || [];
         if (!trData.points.length) {
+          pc.done('该时间段内无轨迹数据');
           U.toast('该时间段内无轨迹数据');
           return;
         }
@@ -101,7 +106,17 @@
           if (trData.points[i].source === 'gnss') gnss++;
         }
         trData.gnssCount = gnss;
-        U.toast('共 ' + trData.points.length + ' 个轨迹点' + (gnss ? '（含 ' + gnss + ' 个 GNSS 精细点）' : ''));
+        var dropped = trData.points.removedOutliers || 0;
+        pc.done('共 ' + trData.points.length + ' 个轨迹点' +
+          (gnss ? ' · GNSS 精细点 ' + gnss : '') +
+          (dropped ? ' · 已剔除异常跳点 ' + dropped + ' 个' : ''));
+        setTimeout(function () {
+          if (prog.isConnected) prog.classList.add('hidden');
+        }, 4000);
+      })['catch'](function () {
+        pc.stop();
+        prog.classList.add('hidden');
+        U.toast('轨迹查询失败，请重试', 'err');
       });
     });
 

@@ -163,7 +163,15 @@
   function generateReport(imei, date) {
     var box = document.getElementById('rp-body');
     if (!box) return;
-    box.innerHTML = '<div class="empty">📊 正在统计当日数据…（轨迹+传感+电量）</div>';
+    box.innerHTML =
+      '<div id="rp-progress" class="tr-progress">' +
+      '  <div class="tr-bar"><div class="tr-fill"></div></div>' +
+      '  <span class="tr-text"></span>' +
+      '</div>';
+    // 日报要拉当天轨迹 + 传感 + 电量 + 近 7 天打卡，本身就是几秒级的多页查询，
+    // 没有进度显示时用户只会以为网页卡死了。
+    var pc = Views.progressCtl('rp-progress');
+    pc.set(0, '正在统计当日数据…');
 
     var dayStart = date + ' 00:00:00';
     var dayEnd = date + ' 23:59:59';
@@ -171,19 +179,49 @@
     // 近 7 天起点（用于连续打卡统计，真实上报判定）
     var base = U.parseLocalTime(date + ' 00:00:00');
     var streakStart = base ? (dateStr(new Date(base.getTime() - 6 * 86400000)) + ' 00:00:00') : dayStart;
+    var weekFilter = { aks: ['ct', 'ct'], acs: ['ge', 'le'], avs: [streakStart, dayEnd] };
 
-    // 三路数据并行：轨迹 / 传感+电量 / 最新位置 / 近7天轨迹（连续打卡）
+    // 四路并行，各自按权重贡献总进度（轨迹 45 / 传感 30 / 打卡 20 / 最新 5）
+    var W = { track: 45, sensor: 30, week: 20, latest: 5 };
+    var R = { track: 0, sensor: 0, week: 0, latest: 0 };
+    var phaseLabel = '正在统计当日数据…';
+    function tick(label) {
+      if (label) phaseLabel = label;
+      pc.set(W.track * R.track + W.sensor * R.sensor + W.week * R.week + W.latest * R.latest, phaseLabel);
+    }
+    function ratio(n, total) { return total > 0 ? Math.min(1, n / total) : 0; }
+
     Promise.all([
-      AC.getTrack(imei, dayStart, dayEnd, {}),
-      AC.fetchAllByTags(imei, [799, 782, 1293, 517, 256, 519], filter, {}),
-      AC.latestLocation(imei),
-      AC.getTrack(imei, streakStart, dayEnd, {})
+      // 1) 当日轨迹（含 location_history 翻页 + 1294 展开 + 异常点剔除）
+      AC.getTrack(imei, dayStart, dayEnd, {
+        onProgress: function (n, total, info) {
+          R.track = (info && typeof info.pct === 'number') ? info.pct / 100 : ratio(n, total);
+          tick('正在获取当日轨迹…');
+        }
+      }).then(function (pts) { R.track = 1; tick(); return pts; }),
+
+      // 2) 传感 / 电量 / 信号 / 温度
+      AC.fetchAllByTags(imei, [799, 782, 1293, 517, 256, 519], filter, {
+        onProgress: function (n, total) { R.sensor = ratio(n, total); tick('正在统计传感与电量…'); }
+      }).then(function (rs) { R.sensor = 1; tick(); return rs; }),
+
+      // 3) 最新位置
+      AC.latestLocation(imei).then(function (r) { R.latest = 1; tick(); return r; }),
+
+      // 4) 连续打卡：只需要「哪几天有定位上报」，用轻量的 513 定位记录即可。
+      //    原来这里又跑了一次完整 getTrack（含 location_history 全量翻页 + 1294 展开），
+      //    而 7 天的数据量是当天的数倍 —— 那正是「生成日报很慢、网络里一堆
+      //    location_history 请求」的主因。现在这一步不再碰 location_history。
+      AC.fetchAllByTags(imei, [513], weekFilter, {
+        onProgress: function (n, total) { R.week = ratio(n, total); tick('正在统计连续打卡…'); }
+      }).then(function (rs) { R.week = 1; tick(); return rs; })
     ]).then(function (results) {
-      if (!box.isConnected) return; // 页面已切换
+      if (!box.isConnected) { pc.stop(); return; } // 页面已切换
+      pc.stop();
       var trackPts = results[0] || [];
       var recs = results[1] || [];
       var latest = (results[2].code === 0 && results[2].value) ? results[2].value : null;
-      var weekPts = results[3] || [];
+      var weekPts = (results[3] || []).map(function (r) { return { ts: U.recTs(r) }; });
 
       var ts1 = trackStats(trackPts);
       var bat = batteryStats(recs);
@@ -211,6 +249,7 @@
         date: date,
         distance: ts1.total,
         trackCount: trackPts.length,
+        dropped: trackPts.removedOutliers || 0,   // 被当作跳点剔除的异常点数
         first: ts1.first, last: ts1.last,
         durationMs: ts1.durationMs,
         avgKmh: ts1.avgKmh,
@@ -232,6 +271,7 @@
       currentModel = model;
       renderCard(model);
     })['catch'](function () {
+      if (pc) pc.stop();
       if (box && box.isConnected) box.innerHTML = '<div class="empty">统计失败，请重试</div>';
     });
   }
@@ -385,7 +425,7 @@
       '    <div class="rc-item"><span>🚶 步数</span><b>' + (model.steps !== null ? model.steps : '--') + '</b></div>' +
       '    <div class="rc-item"><span>⚡ 步频</span><b>' + (model.cadence != null ? (Math.round(model.cadence) + ' 步/分') : '--') + '</b></div>' +
       '    <div class="rc-item"><span>🏃 均速</span><b>' + fmtSpeed(model.avgKmh) + '</b></div>' +
-      '    <div class="rc-item"><span>📍 轨迹点</span><b>' + model.trackCount + '</b></div>' +
+      '    <div class="rc-item" title="' + (model.dropped ? '已剔除 ' + model.dropped + ' 个异常跳点（瞬时位移过大）' : '原始轨迹点') + '"><span>📍 轨迹点</span><b>' + model.trackCount + (model.dropped ? ' <small>剔' + model.dropped + '</small>' : '') + '</b></div>' +
       '    <div class="rc-item"><span>🔋 电量</span><b>' + U.esc(batLine) + '</b></div>' +
       '    <div class="rc-item"><span>⚡ 耗速</span><b>' + (model.bat && model.bat.perHour !== null ? model.bat.perHour + ' mV/h' : '--') + '</b></div>' +
       '    <div class="rc-item"><span>📶 在线覆盖</span><b>' + onlinePct + '%</b></div>' +
