@@ -659,12 +659,15 @@
         out.push(p);
       }
 
-      // 异常点剔除已下线（2026-09-11 周总要求）：定位器经常放在货车上跑高速，
-      // 速度/距离判据会把正常的高速行驶轨迹误杀（跨上报间隔跑 2km+ 很正常）。
-      // Algo.filterTrackOutliers 函数保留但默认不被调用；removedOutliers 恒为 0，
-      // 仅作下游兼容字段。真实异常点交给地图渲染层（画线时异常段本来自成一线，肉眼可辨）。
-      var cleaned = out;
-      cleaned.removedOutliers = 0;
+      // 异常点清理（第三版，零误杀策略）：只删「物理不可能的瞬移」和「孤立漂移点」。
+      // 定位器经常放货车上跑高速 —— 120km/h 的旧判据会整段误杀（已废弃）；
+      // 完全不过滤又会让 GPS 漂移把轨迹搞乱（周总两轮反馈的折中）。
+      // 新判据：>700km/h 或单步 >30km 物理删；单步超 max(2.5km, 200km/h×dt)
+      // 且「下一个点更近锚点」的孤立点删 —— 货车高速永远够不着阈值。
+      var Alg = global.Algo;
+      var st = {};
+      var cleaned = (Alg && Alg.filterTrackOutliers) ? Alg.filterTrackOutliers(out, {}, st) : out;
+      cleaned.removedOutliers = st.dropped || 0;
 
       if (opts.onProgress) {
         try {

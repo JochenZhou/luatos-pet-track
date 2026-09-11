@@ -1107,7 +1107,7 @@ main { min-height: calc(100vh - 58px - 49px); }
 #rp-hours { width: 100%; height: auto; display: block; padding: 0 8px; box-sizing: border-box; }
 .rc-foot { padding: 12px 22px 20px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
 .rp-actions { display: flex; gap: 12px; margin-bottom: 18px; }
-.rp-actions .btn { flex: 1; height: 44px; font-size: 14px; }
+.rp-actions .btn { flex: 1; height: 50px; min-height: 50px; font-size: 15.5px; padding: 0 18px; }
 .rp-export-img { width: 100%; border-radius: var(--radius); box-shadow: var(--e3); margin-bottom: 18px; display: block; }
 
 /* ============================== ㉕ 新增增强组件（可选启用） ============================== */
@@ -1211,6 +1211,7 @@ main { min-height: calc(100vh - 58px - 49px); }
   .rc-big { font-size: 40px; }
   .rc-grid { grid-template-columns: repeat(2, 1fr); }
   .rp-actions { flex-direction: column; }
+  .rp-actions .btn { height: 52px; min-height: 52px; }
   /* 主题选择器：移动端贴边占满可用宽度 */
   .theme-btn { width: 32px; height: 32px; flex-basis: 32px; }
   .theme-pop { right: 10px; left: 10px; width: auto; top: calc(52px + 8px); }

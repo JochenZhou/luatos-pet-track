@@ -86,38 +86,39 @@
   }
 
   /**
-   * 轨迹异常点剔除：太跳跃的点直接抛弃。
+   * 轨迹异常点清理 —— **零误杀策略**（2026-09-11 第三版）。
    *
-   * ⚠️ 已下线（2026-09-11 周总要求）：getTrack 出口不再调用本函数。
-   * 原因：定位器经常放在货车上跑高速 —— 跨上报间隔跑 2km+ 属于正常行驶，
-   * 33.3m/s（120km/h）速度判据 + 5km 距离判据都会把正常轨迹误杀，
-   * 日报里程 / 轨迹点数随之失真。
-   * 函数保留：将来若要兜底真正的 GPS 瞬移（如漂到外省），把阈值放宽到
-   * maxSpeed≈280m/s（1000km/h 量级）+ maxJump≈50km 再启用才安全。
+   * 背景：第一版用 33.3m/s（120km/h）+ 5km 判据，但定位器经常放在货车上跑高速，
+   * 正常行驶被整段误杀（周总反馈「不要过滤」）；第二版完全下线，结果 GPS 漂移
+   * 全部显现，轨迹比原来更乱（周总再次反馈）。本版折中：**只删铁定是漂移的点**，
+   * 真实车辆永远够不着阈值。
    *
-   * 为什么需要：定位漂移（尤其 1294 差分展开时该记录参考点取错）会让折线上突然
-   * 拉出一条远超正常范围的长直线再弹回来，肉眼看着像「瞬移」；日报里还会把里程
-   * 算爆、把最远点算错。
+   * 三层判据（按顺序，锚点 = 上一个「保留」的点）：
+   *   1) 物理不可能：单步 > jumpPhys(30km) 或等效速度 > vPhys(700km/h) → 删。
+   *      真实车辆绝无可能，零误杀。
+   *   2) 单步自适应上限：stray = max(strayMin(2.5km), vLimit(200km/h) × dt)。
+   *      货车 120km/h 在 10s 间隔每步 ≈340m、60s 间隔 ≈2km，都够不着 2.5km 下限；
+   *      而普通 GPS 单点漂移几百米到几公里，会撞线。
+   *   3) 孤立漂移检验（只对撞线的点做）：p 距锚点超限，且下一个点距 p 仍超限，
+   *      但下一个点距锚点反而更近（轨迹「回来了」）→ p 是孤立跳点，删。
+   *      连续移动（真开车）时下一个点只会更远 → 不删。整包偏移（包内点相互很近）
+   *      也不删 —— 宁可多留一条偏移线，不丢任何真实数据。
    *
-   * 判定基准是「锚点」= 上一个**保留**的点，锚点只在保留时前移：
-   *   - 速度判据：距离 / 时间间隔 > maxSpeed(m/s) → 跳点
-   *   - 绝对判据：距离 > maxJump(m)               → 跳点
-   * 用锚点而不是「前一个点」是关键：一整包都偏出去时，包首点被丢后锚点原地不动，
-   * 包内其余点同样判定超限 → **整包一起丢**，不会留下半截飞出去再飞回来的线段。
-   *
-   * 时间间隔优先取 p.dtPrev：1294 包内 10 个样本是 10s/10=1s 一个，跨记录取真实
-   * 上报间隔。**不能**直接拿 p.ts 相减 —— 包内 ts 只差 1ms（那是为了让排序稳定
-   * 才这么排的），拿它算速度会把正常行走全部判成瞬移。
+   * 时间间隔优先取 p.dtPrev：1294 包内 10 个样本是 1s 一个，跨记录取真实上报
+   * 间隔。**不能**直接拿 p.ts 相减 —— 包内 ts 只差 1ms（为了让排序稳定），
+   * 拿它算速度会把正常行走全部判成瞬移。
    *
    * @param points 按时间升序的轨迹点
-   * @param opts   { maxSpeed:33.3, maxJump:5000 }  33.3m/s 与日报 trackStats 的判据保持一致
+   * @param opts   { vPhys:194.4, jumpPhys:30000, vLimit:55.6, strayMin:2500 }
    * @param stats  可选，回填 { dropped, kept }
-   * @returns 剔除后的新数组（不修改入参）
+   * @returns 清理后的新数组（不修改入参）
    */
   function filterTrackOutliers(points, opts, stats) {
     opts = opts || {};
-    var maxSpeed = opts.maxSpeed > 0 ? opts.maxSpeed : 33.3;
-    var maxJump = opts.maxJump > 0 ? opts.maxJump : 5000;
+    var vPhys = opts.vPhys > 0 ? opts.vPhys : 194.4;      // 700km/h，物理不可能
+    var jumpPhys = opts.jumpPhys > 0 ? opts.jumpPhys : 30000;
+    var vLimit = opts.vLimit > 0 ? opts.vLimit : 55.6;    // 200km/h，单步上限
+    var strayMin = opts.strayMin > 0 ? opts.strayMin : 2500;
     var dropped = 0;
     var out = [];
     if (points && points.length) {
@@ -127,11 +128,27 @@
         if (!p || !isFinite(p.lng) || !isFinite(p.lat)) { dropped++; continue; }
         if (!anchor) { out.push(p); anchor = p; continue; }
         var d = distM(anchor.lng, anchor.lat, p.lng, p.lat);
-        if (d > maxJump) { dropped++; continue; }
+        // 1) 物理不可能
+        if (d > jumpPhys) { dropped++; continue; }
         var dt = (typeof p.dtPrev === 'number' && p.dtPrev > 0)
           ? p.dtPrev
           : ((p.ts && anchor.ts && p.ts > anchor.ts) ? (p.ts - anchor.ts) / 1000 : 0);
-        if (dt > 0 && d / dt > maxSpeed) { dropped++; continue; }
+        if (dt > 0 && d / dt > vPhys) { dropped++; continue; }
+        // 2) 单步自适应上限
+        var stray = Math.max(strayMin, vLimit * (dt > 0 ? dt : 10));
+        if (d > stray) {
+          // 3) 孤立漂移检验：下一个合法点也远离、且距锚点反而更近 → p 是孤立跳点
+          var n = null;
+          for (var j = i + 1; j < points.length; j++) {
+            if (points[j] && isFinite(points[j].lng) && isFinite(points[j].lat)) { n = points[j]; break; }
+          }
+          if (n) {
+            var dNext = distM(p.lng, p.lat, n.lng, n.lat);
+            var dBack = distM(anchor.lng, anchor.lat, n.lng, n.lat);
+            if (dNext > stray && dBack < d * 0.9) { dropped++; continue; }
+          }
+          // 不满足孤立特征（连续远离 = 可能在真实移动）→ 保留
+        }
         out.push(p);
         anchor = p;
       }

@@ -353,7 +353,7 @@ return AC.request('/list_my_projects', {}).then(r => {
       ok(mono && seen[seen.length - 1].pct === 100,
         'T143 总进度单调不减且收尾 100%（' + seen.length + ' 次回调）');
       ok(pts.length > 0 && pts.removedOutliers === 0,
-        'T144 getTrack 返回带 removedOutliers（剔除已下线，恒 0；实际 got ' + pts.removedOutliers + '）');
+        'T144 getTrack 返回带 removedOutliers（正常轨迹清理数为 0；实际 got ' + pts.removedOutliers + '）');
 
       // 耗时对照：同样 5 页、每页固定 25ms，串行要等 5 个往返，并发只要 2 个
       return timedTags(1).then(tSerial => timedTags(4).then(tConc => {
@@ -659,7 +659,10 @@ return AC.request('/list_my_projects', {}).then(r => {
       && javaText.indexOf('import android.content.SharedPreferences;') > 0,
       'T129 Android 加载 URL 带版本号 + 换版本清 HTTP 缓存');
 
-    /* ================= 轨迹异常点剔除（太跳跃的点直接抛弃） ================= */
+    /* ================= 轨迹异常点清理（零误杀策略，第三版） =================
+       背景：第一版 120km/h 判据误杀货车高速（周总：不要过滤）；第二版完全下线，
+       GPS 漂移全显现（周总：更乱了）。第三版只删「物理不可能」和「孤立漂移点」，
+       真实车辆永远够不着阈值。 */
     const D_LAT = 10 / 111320;   // 向北 10m
     const D_LNG = 10 / 96486;    // 北纬 30° 向东 10m
     const mkPt = (lng, lat, i, dtPrev) =>
@@ -671,22 +674,38 @@ return AC.request('/list_my_projects', {}).then(r => {
     const walkKept = Algo.filterTrackOutliers(walkPts, {}, {});
     ok(walkKept.length === 6, 'T130 正常行走轨迹一点不删 (got ' + walkKept.length + '/6)');
 
-    // 单点漂移：中间插一个偏东约 1000m 的点，前后都正常
+    // 货车高速：每 10s 跑 340m（≈122km/h）连续移动 —— 必须全部保留
+    const truckPts = [];
+    for (let i = 0; i < 8; i++) truckPts.push(mkPt(104.0 + i * 340 / 96486, 30.0, i));
+    const truckStat = {};
+    const truckKept = Algo.filterTrackOutliers(truckPts, {}, truckStat);
+    ok(truckKept.length === 8 && truckStat.dropped === 0,
+      'T131 货车高速 122km/h 连续移动一点不删（第一版会整段误杀）');
+
+    // 孤立漂移点：偏出 4km、下一个点又回到锚点附近 → 删
     const driftPts = walkPts.slice();
-    driftPts.splice(3, 0, { lng: 104.0 + 1000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 5 });
+    driftPts.splice(3, 0, { lng: 104.0 + 4000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 10 });
     const driftStat = {};
     const driftKept = Algo.filterTrackOutliers(driftPts, {}, driftStat);
     ok(driftKept.length === 6 && driftStat.dropped === 1,
-      'T131 单点漂移（约 1000m/5s）被剔除，其余保留 (kept=' + driftKept.length + ' dropped=' + driftStat.dropped + ')');
+      'T131b 孤立漂移（4km，下一点回到锚点附近）被剔除 (kept=' + driftKept.length + ' dropped=' + driftStat.dropped + ')');
 
-    // 整包偏移：某条记录参考点取错，连着 5 个点整体偏出去 1.5km
+    // 整包偏移：参考点取错连偏 5 个点 —— 新策略**保留**（宁多留不误删）
     const bulkPts = [];
     for (let i = 0; i < 3; i++) bulkPts.push(mkPt(104.0, 30.0 + i * D_LAT, i));
     for (let i = 0; i < 5; i++) bulkPts.push(mkPt(104.0 + 1500 / 96486, 30.0 + (3 + i) * D_LAT, 3 + i));
     const bulkStat = {};
     const bulkKept = Algo.filterTrackOutliers(bulkPts, {}, bulkStat);
-    ok(bulkKept.length === 3 && bulkStat.dropped === 5,
-      'T132 整包偏移连着 5 个点一起丢，不留半截飞出去的线段 (kept=' + bulkKept.length + ')');
+    ok(bulkKept.length === 8 && bulkStat.dropped === 0,
+      'T132 整包偏移保留（零误杀：包内点相互连续，不满足孤立特征）');
+
+    // 物理不可能：单步 40km / 700km/h 瞬移 → 删
+    const physPts = walkPts.slice();
+    physPts.splice(3, 0, { lng: 104.0 + 40000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 10 });
+    const physStat = {};
+    const physKept = Algo.filterTrackOutliers(physPts, {}, physStat);
+    ok(physKept.length === 6 && physStat.dropped === 1,
+      'T132b 物理不可能瞬移（40km/10s）被删');
 
     // 1294 包内 10 个样本：ts 只差 1ms，实际是 1s 一个 —— 必须靠 dtPrev 判定
     const pktPts = [];
@@ -695,9 +714,6 @@ return AC.request('/list_my_projects', {}).then(r => {
     }
     const pktKept = Algo.filterTrackOutliers(pktPts, {}, {});
     ok(pktKept.length === 10, 'T133 1294 包内 1ms 时间戳不被误判为瞬移 (kept=' + pktKept.length + '/10)');
-    // 反向对照：去掉 dtPrev 后同一批点确实会被误删 —— 证明该字段不是可选项
-    const noHintKept = Algo.filterTrackOutliers(pktPts.map(p => ({ lng: p.lng, lat: p.lat, ts: p.ts })), {}, {});
-    ok(noHintKept.length < 10, 'T134 反向对照：缺 dtPrev 时确实误删 (kept=' + noHintKept.length + '/10)');
 
     /* ================= 日报 / 回放：耗时与反馈的源码级约束 ================= */
     const v2Text = fs.readFileSync(path.join(ROOT, 'js/app/views2.js'), 'utf8');
@@ -717,11 +733,12 @@ return AC.request('/list_my_projects', {}).then(r => {
       'T138 通用进度条控制器已挂到 Views');
     ok(acText.indexOf('runPool(') > 0 && acText.indexOf('page++;') < 0,
       'T139 翻页改为并发（存在 runPool，串行 step 递归已移除）');
-    ok(acText.indexOf('Alg.filterTrackOutliers') < 0
-      && acText.indexOf('removedOutliers = 0') > 0,
-      'T140 getTrack 出口已下线异常点剔除（货车高速会被误杀），removedOutliers 恒 0 兼容下游');
-    ok(algText.indexOf('function filterTrackOutliers') > 0,
-      'T140b Algo.filterTrackOutliers 函数保留（默认不启用，留作将来放宽阈值的兜底）');
+    ok(acText.indexOf('Alg.filterTrackOutliers') > 0
+      && acText.indexOf('removedOutliers = 0') < 0,
+      'T140 getTrack 出口接零误杀清理（只删物理不可能+孤立漂移，货车高速不受影响）');
+    ok(algText.indexOf('vPhys') > 0 && algText.indexOf('strayMin') > 0
+      && algText.indexOf('dBack < d * 0.9') > 0,
+      'T140b 清理算法为第三版零误杀策略（物理判据 + 自适应上限 + 孤立点检验）');
 
     return parallelChecks();
   }).then(summarize);
