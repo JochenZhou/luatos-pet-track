@@ -352,8 +352,8 @@ return AC.request('/list_my_projects', {}).then(r => {
       for (let i = 1; i < seen.length; i++) if (seen[i].pct < seen[i - 1].pct - 0.01) mono = false;
       ok(mono && seen[seen.length - 1].pct === 100,
         'T143 总进度单调不减且收尾 100%（' + seen.length + ' 次回调）');
-      ok(pts.length > 0 && typeof pts.removedOutliers === 'number',
-        'T144 getTrack 返回带 removedOutliers（已剔除异常点数=' + pts.removedOutliers + '）');
+      ok(pts.length > 0 && pts.removedOutliers === 0,
+        'T144 getTrack 返回带 removedOutliers（剔除已下线，恒 0；实际 got ' + pts.removedOutliers + '）');
 
       // 耗时对照：同样 5 页、每页固定 25ms，串行要等 5 个往返，并发只要 2 个
       return timedTags(1).then(tSerial => timedTags(4).then(tConc => {
@@ -608,6 +608,7 @@ return AC.request('/list_my_projects', {}).then(r => {
 
     /* ================= 设备列表增量渲染 + 请求失败保留旧数据 ================= */
     const viewsText = fs.readFileSync(path.join(ROOT, 'js/app/views.js'), 'utf8');
+    const algText = fs.readFileSync(path.join(ROOT, 'js/algo/alg.js'), 'utf8');
     // 卡片列表必须按 imei 增量更新：整表 innerHTML 重建会让毛玻璃(backdrop-filter)
     // 合成层反复销毁重建，移动端表现为肉眼可见的闪烁
     ok(viewsText.indexOf('box.innerHTML = html') < 0
@@ -716,8 +717,11 @@ return AC.request('/list_my_projects', {}).then(r => {
       'T138 通用进度条控制器已挂到 Views');
     ok(acText.indexOf('runPool(') > 0 && acText.indexOf('page++;') < 0,
       'T139 翻页改为并发（存在 runPool，串行 step 递归已移除）');
-    ok(acText.indexOf('Alg.filterTrackOutliers') > 0,
-      'T140 getTrack 出口统一做异常点剔除（日报与回放共用）');
+    ok(acText.indexOf('Alg.filterTrackOutliers') < 0
+      && acText.indexOf('removedOutliers = 0') > 0,
+      'T140 getTrack 出口已下线异常点剔除（货车高速会被误杀），removedOutliers 恒 0 兼容下游');
+    ok(algText.indexOf('function filterTrackOutliers') > 0,
+      'T140b Algo.filterTrackOutliers 函数保留（默认不启用，留作将来放宽阈值的兜底）');
 
     return parallelChecks();
   }).then(summarize);

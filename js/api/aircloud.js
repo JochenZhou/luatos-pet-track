@@ -659,12 +659,12 @@
         out.push(p);
       }
 
-      // 异常点剔除：太跳跃的点直接抛弃。放在这里而不是各调用方，
-      // 日报（里程统计）与轨迹回放（画折线）就都吃到同一层清洗。
-      var Alg = global.Algo;
-      var st = {};
-      var cleaned = (Alg && Alg.filterTrackOutliers) ? Alg.filterTrackOutliers(out, {}, st) : out;
-      cleaned.removedOutliers = st.dropped || 0;
+      // 异常点剔除已下线（2026-09-11 周总要求）：定位器经常放在货车上跑高速，
+      // 速度/距离判据会把正常的高速行驶轨迹误杀（跨上报间隔跑 2km+ 很正常）。
+      // Algo.filterTrackOutliers 函数保留但默认不被调用；removedOutliers 恒为 0，
+      // 仅作下游兼容字段。真实异常点交给地图渲染层（画线时异常段本来自成一线，肉眼可辨）。
+      var cleaned = out;
+      cleaned.removedOutliers = 0;
 
       if (opts.onProgress) {
         try {
