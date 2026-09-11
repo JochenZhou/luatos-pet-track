@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 顶栏菜单按钮：12dp 圆角 + 1px 描边（与 Web 端 --line / --r-sm 对齐） -->
+<!-- 顶栏菜单按钮：12dp 圆角 + 1px 描边（对齐 Web 端 line 色 / r-sm 圆角） -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <solid android:color="#FFFFFF" />
