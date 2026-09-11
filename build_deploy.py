@@ -48,7 +48,9 @@ def read(path):
 
 
 def write(path, content):
-    with open(os.path.join(ROOT, path), 'w', encoding='utf-8') as f:
+    # newline='\n' 必须显式指定：Windows 上 Python 文本模式会把 \n 翻成 \r\n，
+    # 产物会白白多出 7.6 KB（实测 388,961 → 381,364 B），且与「仓库文本一律 LF」约定不符。
+    with open(os.path.join(ROOT, path), 'w', encoding='utf-8', newline='\n') as f:
         f.write(content)
 
 
@@ -100,7 +102,7 @@ def main():
     html = inject_inline_js(html, '__SCRIPT__', app_js)
 
     out = os.path.join(ROOT, 'index.html')
-    with open(out, 'w', encoding='utf-8') as f:
+    with open(out, 'w', encoding='utf-8', newline='\n') as f:
         f.write(html)
     size_kb = os.path.getsize(out) / 1024
     print('index.html 生成完成：%.1f KB' % size_kb)

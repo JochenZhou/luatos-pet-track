@@ -295,9 +295,22 @@
   --line-strong: #2A3448;
   --text: #F1F5FB;
   --muted: #94A3B8;
-  --faint: #6B7A90;
-  --ink-100: #1B2334;
+  --faint: #7E8CA3;
+  /* ⚠️ 中性色阶必须整条反相。
+     深色块原先只覆盖了 --ink-100/200，而全站正文大量使用
+     var(--ink-700/600/500)（.pc-row / .btn-ghost / .user-chip / .fl-* …）——
+     这些令牌在深色下仍是「浅色主题的深墨色」，于是文字全糊在深底上。
+     约定：--ink-100/200/300 只当「表面/描边」用，--ink-400~900 只当「文字」用，
+     所以反相即可两全 —— 文字变亮、表面仍深。 */
+  --ink-900: #F4F7FC;
+  --ink-800: #DEE5F1;
+  --ink-700: #C6D1E1;   /* 主要正文 / 次级标题 */
+  --ink-600: #A8B6CB;   /* 次级文字 */
+  --ink-500: #93A1B8;   /* muted */
+  --ink-400: #7E8CA3;   /* faint */
+  --ink-300: #3A4557;   /* 描边（原 --ink-300 的对照位） */
   --ink-200: #2A3448;
+  --ink-100: #1B2334;
   --ok-soft: rgba(16,185,129,.14);
   --warn-soft: rgba(245,158,11,.14);
   --danger-soft: rgba(244,63,94,.14);
@@ -309,6 +322,35 @@
   --e2: 0 2px 6px rgba(0,0,0,.4), 0 10px 24px -8px rgba(0,0,0,.5);
   --e3: 0 6px 14px -4px rgba(0,0,0,.5), 0 22px 48px -16px rgba(0,0,0,.6);
   --e4: 0 10px 24px -8px rgba(0,0,0,.55), 0 40px 80px -28px rgba(0,0,0,.7);
+}
+
+/* —— 深色底图 ——
+   腾讯地图 JS API GL 的个性化样式（mapStyleId=style0~7）**必须先在 lbs.qq.com
+   控制台把样式与该 key 绑定**才生效，未绑定则静默忽略（实测 style1/2/3/4/7 截图
+   与经典样式逐字节一致）。控制台改不了，就在前端做：只对底图 canvas 反相加色相
+   旋转，TMap 的标记/覆盖物在独立的 DOM 层里，颜色不受影响（实测定位针保持青色）。 */
+[data-theme="dark"] .map-full > canvas,
+[data-theme="dark"] .map-track > canvas,
+[data-theme="dark"] .map-full canvas.tmap-canvas,
+[data-theme="dark"] .map-track canvas.tmap-canvas {
+  filter: invert(1) hue-rotate(180deg) brightness(.94) contrast(.88);
+}
+
+/* 腾讯地图自带的控件（比例尺、版号）在深色底图上是黑字/黑刻度线 —— 直接看不见。
+   ⚠️ 必须用 !important：
+     1) 版号 .logo-text 的颜色是 TMap 写的**内联样式**（实测 inline color:rgb(51,51,51)）；
+     2) 比例尺刻度线 .tmap-scale-line 是黑色实底（实测 bg rgb(0,0,0)），
+        且其规则来自 TMap 运行时注入的样式表。
+   普通选择器两条都压不住，只有 !important 能赢。 */
+[data-theme="dark"] .tmap-scale-text,
+[data-theme="dark"] .logo-text,
+[data-theme="dark"] .logo-text a,
+[data-theme="dark"] .logo-text span { color: #A9B6CB !important; }
+[data-theme="dark"] .tmap-scale-line,
+[data-theme="dark"] .tmap-scale-center,
+[data-theme="dark"] .tmap-scale-border {
+  background-color: #A9B6CB !important;
+  border-color: #A9B6CB !important;
 }
 
 /* ============================== ② 基础重置 ============================== */
@@ -346,7 +388,9 @@ body {
   font-variant-numeric: tabular-nums;
 }
 a { color: var(--brand-600); text-decoration: none; transition: color .15s var(--ease-out); }
-button { font-family: inherit; cursor: pointer; }
+/* color: inherit 必须有：<button> 默认用浏览器 UA 的 buttontext（近黑），
+   深色模式下会变成「黑字压深底」。.btn / .btn.ghost 自己声明了颜色，不受影响。 */
+button { font-family: inherit; cursor: pointer; color: inherit; }
 input, select, textarea { font-family: inherit; font-size: 13px; color: var(--text); }
 .hidden { display: none !important; }
 .mute { color: var(--muted); font-size: 12px; }
@@ -769,14 +813,16 @@ main { min-height: calc(100vh - 58px - 49px); }
   backdrop-filter: blur(16px);
   border: 1px solid var(--line); border-radius: var(--r-md);
   padding: 12px 14px; box-shadow: var(--e2);
-  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  /* 换行布局：围栏名 + 副标题（含生效设备）独占一行，操作按钮落到第二行右对齐。
+     原来是 nowrap 单行，副标题一旦带上「🐾 设备…」就被右侧按钮压住看不见。 */
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
   transition: all .2s var(--ease-out);
 }
 .fl-item:hover { box-shadow: var(--e3); transform: translateX(-2px); }
-.fl-main { min-width: 0; }
+.fl-main { min-width: 0; flex: 1 1 100%; }
 .fl-main b { font-size: 13.5px; display: block; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fl-sub { font-size: 11px; color: var(--faint); white-space: nowrap; }
-.fl-acts { display: flex; gap: 5px; flex-shrink: 0; }
+.fl-sub { font-size: 11px; color: var(--faint); white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+.fl-acts { display: flex; gap: 5px; flex-shrink: 0; margin-left: auto; }
 
 /* —— 围栏保存弹窗：生效设备多选 —— */
 .fd-head { font-weight: 700; font-size: 13px; margin-top: 14px; }

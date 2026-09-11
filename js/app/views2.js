@@ -204,6 +204,8 @@
       '  <div id="fence-list" class="fence-list"></div>' +
       '  <div id="fence-tip" class="fence-tip hidden"></div>' +
       '  <div id="fence-actions" class="fence-actions hidden">' +
+      '    <button id="f-rminus" class="btn sm ghost hidden">－ 半径</button>' +
+      '    <button id="f-rplus" class="btn sm ghost hidden">＋ 半径</button>' +
       '    <button id="f-undo" class="btn sm ghost hidden">↩ 撤销一点</button>' +
       '    <button id="f-cancel" class="btn sm ghost">取消</button>' +
       '    <button id="f-done" class="btn sm hidden">✓ 完成绘制</button>' +
@@ -215,7 +217,29 @@
     renderFenceList();
     drawAllFences();
 
-    var st = { mode: 'idle', circleCenter: null, polyPoints: [], preview: null, previewCircle: null };
+    var st = {
+      mode: 'idle', circleCenter: null, polyPoints: [], preview: null, previewCircle: null,
+      radius: 0, vertexDots: []
+    };
+
+    /**
+     * 圆形围栏的**默认预览半径**：按当前缩放换算成「屏幕上约 30px」，
+     * 保证第一次点下圆心立刻就能看到一个大小合理的圆。
+     * 固定值不行 —— 固定 100m 在 zoom 12 只有 2~3px，肉眼根本看不见，
+     * 用户会以为「点了第一个点之后完全没有预览」。
+     */
+    function defaultRadiusM() {
+      var mpp = 32.9;   // 缺省：zoom 12 / 北纬 30° 左右的地面分辨率
+      try {
+        var map = MapKit.getMap();
+        if (map && map.getZoom && map.getCenter) {
+          var z = Number(map.getZoom()) || 12;
+          var lat = Number(map.getCenter().getLat()) || 30;
+          mpp = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z);
+        }
+      } catch (e) { /* 用缺省值 */ }
+      return Math.max(30, Math.round(mpp * 36 / 10) * 10);
+    }
 
     // 保存围栏时要选「针对哪台设备」，设备列表走缓存（60s TTL），进页面就预热
     var fenceDevices = [];
@@ -252,7 +276,11 @@
       function finish(save) {
         if (!box.parentNode) return;
         box.parentNode.removeChild(box);
-        if (!save) return;
+        if (!save) {
+          // 取消保存：把绘制预览（圆 / 顶点 / 折线）一并清掉，否则会赖在图上
+          if (typeof opts.onCancel === 'function') { try { opts.onCancel(); } catch (e) { /* ignore */ } }
+          return;
+        }
         var imeis = [];
         Array.prototype.forEach.call(box.querySelectorAll('.fd-item input:checked'), function (cb) {
           imeis.push(cb.value);
@@ -278,23 +306,43 @@
       var el = $('fence-tip');
       if (el) el.classList.add('hidden');
     }
-    /** 绘制期操作条：按模式显示「撤销一点 / 取消 / 完成绘制」 */
+    /** 绘制期操作条：按模式显示「±半径 / 撤销一点 / 取消 / 完成绘制」 */
     function showActions(opts) {
       var bar = $('fence-actions');
       if (!bar) return;
       if (!opts) { bar.classList.add('hidden'); return; }
       bar.classList.remove('hidden');
-      var undo = $('f-undo'), done = $('f-done');
+      var undo = $('f-undo'), done = $('f-done'), rm = $('f-rminus'), rp = $('f-rplus');
       if (undo) undo.classList[opts.undo ? 'remove' : 'add']('hidden');
       if (done) done.classList[opts.done ? 'remove' : 'add']('hidden');
+      if (rm) rm.classList[opts.radius ? 'remove' : 'add']('hidden');
+      if (rp) rp.classList[opts.radius ? 'remove' : 'add']('hidden');
+    }
+
+    function tipRadius() {
+      tip('半径 ' + st.radius + ' 米 · 移动鼠标或再点一处确定，也可用「－/＋ 半径」微调');
+    }
+
+    /** 触屏没有 mousemove，用 ± 按钮按 20% 步长微调预览半径 */
+    function stepRadius(dir) {
+      if (st.mode !== 'circle_radius' || !st.circleCenter) return;
+      var cur = st.radius || defaultRadiusM();
+      var step = Math.max(20, Math.round(cur * 0.2 / 10) * 10);
+      st.radius = Math.max(20, cur + dir * step);
+      if (st.previewCircle) st.previewCircle.setRadius(st.radius, st.circleCenter);
+      tipRadius();
     }
 
     function resetMode() {
       st.mode = 'idle';
       st.circleCenter = null;
       st.polyPoints = [];
+      st.radius = 0;
       if (st.preview) { st.preview.remove(); st.preview = null; }
       if (st.previewCircle) { st.previewCircle.remove(); st.previewCircle = null; }
+      // 顶点圆点是逐个 addTemp 出来的，必须逐个摘掉，否则会留在图上
+      (st.vertexDots || []).forEach(function (d) { try { d.remove(); } catch (e) { /* ignore */ } });
+      st.vertexDots = [];
       hideTip();
       showActions(null);
     }
@@ -317,7 +365,8 @@
         title: '⬠ 保存多边形围栏',
         nameValue: '我的多边形围栏',
         hint: '共 ' + pts.length + ' 个顶点',
-        okText: '保存围栏'
+        okText: '保存围栏',
+        onCancel: resetMode
       }, function (name, imeis) {
         FenceStore.add({ kind: 'polygon', name: name || '多边形围栏', points: pts, imeis: imeis });
         U.toast('✅ 多边形围栏已保存' + (imeis.length ? '（针对 ' + imeis.length + ' 台设备）' : '（全部设备）'));
@@ -340,9 +389,13 @@
       showActions({});
     });
     $('f-cancel').addEventListener('click', function () { resetMode(); U.toast('已取消绘制'); });
+    $('f-rminus').addEventListener('click', function () { stepRadius(-1); });
+    $('f-rplus').addEventListener('click', function () { stepRadius(1); });
     $('f-undo').addEventListener('click', function () {
       if (st.mode !== 'polygon' || !st.polyPoints.length) return;
       st.polyPoints.pop();
+      var dot = st.vertexDots.pop();
+      if (dot) { try { dot.remove(); } catch (e) { /* ignore */ } }
       if (st.preview) st.preview.setPath(st.polyPoints);
       var n = st.polyPoints.length;
       tip(n >= 3 ? ('已加 ' + n + ' 个顶点，可点「完成绘制」') : ('已加 ' + n + ' 个顶点，至少需要 3 个'));
@@ -356,30 +409,31 @@
       if (st.mode === 'circle_center') {
         st.circleCenter = [lng, lat];
         st.mode = 'circle_radius';
+        st.radius = defaultRadiusM();
         st.preview = MapKit.addTemp({ kind: 'dot', point: [lng, lat], radius: 5, color: '--brand-600' });
-        // 圆心一落点就建预览圆（半径 0 起步）：触屏没有 mousemove，
-        // 不建的话第二次点击前用户完全看不到圆在长多大
-        if (!st.previewCircle) {
-          st.previewCircle = MapKit.addTemp({
-            kind: 'circle', center: [lng, lat], radius: 0,
-            color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL
-          });
-        }
-        tip('再点一处确定半径（≥20 米）；鼠标移动可实时预览大小');
+        // 圆心一落点**立刻**画出可见大小的预览圆：给半径 0 或固定 100m 都不行，
+        // 前者不渲染、后者在 zoom 12 只有 2~3px，用户看不到任何预览
+        st.previewCircle = MapKit.addTemp({
+          kind: 'circle', center: [lng, lat], radius: st.radius,
+          color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL
+        });
+        tipRadius();
+        showActions({ radius: true });
       } else if (st.mode === 'circle_radius') {
         var dist = distanceM(st.circleCenter[0], st.circleCenter[1], lng, lat);
         if (dist < 20) { U.toast('半径需 ≥ 20 米', 'err'); return; }
         var radius = Math.round(dist);
         var center = [st.circleCenter[0], st.circleCenter[1]];
-        // 定格最终半径：触屏没有 mousemove，第二击必须补上预览圆，
-        // 否则保存弹窗期间用户看到的还是「裸圆心」，不知道自己画了多大
-        if (!st.previewCircle) {
+        st.radius = radius;
+        // 定格最终半径（必须带上圆心：updateGeometries 是整条替换，
+        // 少传 center 会把圆改没）
+        if (st.previewCircle) {
+          st.previewCircle.setRadius(radius, center);
+        } else {
           st.previewCircle = MapKit.addTemp({
-            kind: 'circle', center: center, radius: dist,
+            kind: 'circle', center: center, radius: radius,
             color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL
           });
-        } else {
-          st.previewCircle.setRadius(dist);
         }
         st.mode = 'idle';                     // 冻结绘制，避免弹窗期间继续改半径
         showActions(null);
@@ -387,7 +441,8 @@
           title: '⭕ 保存圆形围栏',
           nameValue: '我的围栏',
           hint: '半径 ' + radius + ' 米 · 圆心 ' + center[0].toFixed(5) + ', ' + center[1].toFixed(5),
-          okText: '保存围栏'
+          okText: '保存围栏',
+          onCancel: resetMode
         }, function (name, imeis) {
           FenceStore.add({ kind: 'circle', name: name || '我的围栏', center: center, radius: radius, imeis: imeis });
           U.toast('✅ 围栏已保存' + (imeis.length ? '（针对 ' + imeis.length + ' 台设备）' : '（全部设备）'));
@@ -397,6 +452,9 @@
         });
       } else if (st.mode === 'polygon') {
         st.polyPoints.push([lng, lat]);
+        // 每点一个顶点就立刻落一颗可见的圆点。只画折线的话：1 个点什么都看不到，
+        // 2 个点只有一条细线 —— 用户会以为「点了没反应」，一直点到第 4 个才发现有东西
+        st.vertexDots.push(MapKit.addTemp({ kind: 'dot', point: [lng, lat], radius: 5, color: '--brand-600' }));
         if (!st.preview) {
           st.preview = MapKit.addTemp({ kind: 'polyline', points: [], color: '--brand-500', weight: 3, dash: '6 4' });
         }
@@ -412,14 +470,18 @@
 
     MapKit.on('mousemove', function (e) {
       if (st.mode === 'circle_radius' && st.circleCenter && MapKit.mapAlive()) {
-        var dist = distanceM(st.circleCenter[0], st.circleCenter[1], e.lng, e.lat);
-        if (!st.previewCircle) {
-          st.previewCircle = MapKit.addTemp({ kind: 'circle', center: st.circleCenter, radius: dist, color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL });
+        var dist = Math.max(1, Math.round(distanceM(st.circleCenter[0], st.circleCenter[1], e.lng, e.lat)));
+        st.radius = dist;
+        if (st.previewCircle) {
+          st.previewCircle.setRadius(dist, st.circleCenter);
         } else {
-          st.previewCircle.setRadius(dist);
+          st.previewCircle = MapKit.addTemp({
+            kind: 'circle', center: st.circleCenter, radius: dist,
+            color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL
+          });
         }
         // 实时报半径：用户拖动时能直接看到「这个围栏大概多大」
-        tip('半径约 ' + Math.round(dist) + ' 米 · 点击地图确定（≥20 米）');
+        tip('半径约 ' + dist + ' 米 · 点击地图确定，也可用「－/＋ 半径」微调（≥20 米）');
       }
     });
 
