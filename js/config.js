@@ -69,20 +69,32 @@
   var KEY_PROFILES = 'pt_profiles';
   var KEY_HIDDEN_DEVICES = 'pt_hidden_devices';
   var KEY_FENCES = 'pt_fences';
+  var KEY_LOC_CACHE = 'pt_loc_cache';   // 设备最近定位持久化缓存（js/loc-cache.js）
   var KEY_NICK = 'pt_nick';
   var KEY_ACCOUNT = 'pt_account';
+
+  // 主题与推送偏好
+  // 注意：这三个键必须存「裸字符串」（不经过 U.store 的 JSON.stringify），
+  // 因为 index.tpl.html 的防闪内联脚本要直接读 localStorage，不能依赖序列化格式。
+  var KEY_ACCENT = 'pt_accent';          // 配色预设（data-accent）
+  var KEY_THEME_MODE = 'pt_theme_mode';  // light | dark
+  var KEY_PUSH = 'pt_push';              // '1' 开启 / '0' 关闭
 
   // ============ 平台参数 ============
   var DEFAULT_PAGE_SIZE = 50;    // list_by_tags 建议 [0,100]
   var LIST_MAX_SIZE = 100;
   var REQ_TIMEOUT = 15000;       // fetch 15s 超时
   var POLL_STATUS_MS = 10000;    // 首页状态轮询间隔
+  var FENCE_WATCH_MS = 30000;    // 越界巡检间隔（每轮只抽查一台设备，压低请求频率）
   var FENCE_ALERT_DEBOUNCE = 300000; // 围栏报警 5 分钟去抖
   var STATUS_TTL_MS = 30000;     // 设备状态缓存有效期（切 tab 内复用，过期后台刷新）
   var DEVICES_TTL_MS = 60000;    // 设备列表缓存有效期
 
   // 设备名称云同步 cls（common/put）与 uni_key 说明
   var DEVNAME_CLS = 10;
+
+  // 设备未命名时的占位名（多处在用，集中一处便于统一改文案）
+  var DEV_PLACEHOLDER_NAME = '未命名设备';
 
   // 坐标源标记
   var COORD_GCJ02 = 'gcj02';
@@ -117,16 +129,22 @@
     KEY_PROFILES: KEY_PROFILES,
     KEY_HIDDEN_DEVICES: KEY_HIDDEN_DEVICES,
     KEY_FENCES: KEY_FENCES,
+    KEY_LOC_CACHE: KEY_LOC_CACHE,
     KEY_NICK: KEY_NICK,
     KEY_ACCOUNT: KEY_ACCOUNT,
+    KEY_ACCENT: KEY_ACCENT,
+    KEY_THEME_MODE: KEY_THEME_MODE,
+    KEY_PUSH: KEY_PUSH,
     DEFAULT_PAGE_SIZE: DEFAULT_PAGE_SIZE,
     LIST_MAX_SIZE: LIST_MAX_SIZE,
     REQ_TIMEOUT: REQ_TIMEOUT,
     POLL_STATUS_MS: POLL_STATUS_MS,
+    FENCE_WATCH_MS: FENCE_WATCH_MS,
     FENCE_ALERT_DEBOUNCE: FENCE_ALERT_DEBOUNCE,
     STATUS_TTL_MS: STATUS_TTL_MS,
     DEVICES_TTL_MS: DEVICES_TTL_MS,
     DEVNAME_CLS: DEVNAME_CLS,
+    DEV_PLACEHOLDER_NAME: DEV_PLACEHOLDER_NAME,
     COORD_GCJ02: COORD_GCJ02,
     COORD_WGS84: COORD_WGS84,
     USE_PLATFORM_VAL: true

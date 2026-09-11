@@ -1,9 +1,10 @@
 /**
- * smoke-test.js —— 结构级冒烟测试（stub fetch，65 项）
+ * smoke-test.js —— 结构级冒烟测试（stub fetch，110+ 项）
  * 运行：node smoke-test.js
  * 断言：URL 网关路径 / 三鉴权头无 Bearer / Content-Type / 未登录不发请求 /
  *       102 失效清键跳 login / tags 透传 sanitize / recTs 本地钟面恒等 /
- *       tagById(799) 电压 / 轨迹抽稀 / 围栏 GCJ02 判定 / 坐标转换 / …
+ *       tagById(799) 电压 / 轨迹抽稀 / 围栏 GCJ02 判定 / 坐标转换 /
+ *       1294 精细点展开 / 主题预设 CSS↔JS 一致性 / 报警推送通道与去重 / …
  */
 'use strict';
 
@@ -30,14 +31,37 @@ global.fetch = function (url, opts) {
 global.location = { href: 'https://iot.luatos.com/ai_app/luatos/test11/index.html', replace() {}, origin: 'https://iot.luatos.com' };
 global.history = { replaceState() {} };
 global.window = global;
-global.document = { addEventListener() {}, readyState: 'complete', getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], body: { contains: () => true } };
+// document 需要撑到「主题要落 data-* 属性」「推送要判 document.hidden」这两件事
+global.document = {
+  addEventListener() {},
+  readyState: 'complete',
+  getElementById: () => null,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  body: { contains: () => true, appendChild() {} },
+  documentElement: {
+    _a: {},
+    setAttribute(k, v) { this._a[k] = String(v); },
+    getAttribute(k) { return this._a[k] || null; }
+  },
+  hidden: false,
+  createElement: () => ({
+    style: {}, classList: { add() {}, remove() {}, contains: () => false },
+    addEventListener() {}, appendChild() {}, setAttribute() {},
+    querySelector: () => null, querySelectorAll: () => []
+  })
+};
+// cssVar 走 getComputedStyle 取色，这里给两个已知变量
+global.getComputedStyle = () => ({
+  getPropertyValue: (n) => ({ '--brand-600': '#0D9488', '--bg': '#F5F7FB', '--logo': "url(\"data:image/png;base64,AAA\")" }[n] || '')
+});
 
 // 加载源码（顺序与构建一致）
 const fs = require('fs');
 const path = require('path');
 const ROOT = __dirname;
 const files = [
-  'js/config.js', 'js/utils.js', 'js/pet-store.js', 'js/fence.js',
+  'js/config.js', 'js/utils.js', 'js/theme.js', 'js/pet-store.js', 'js/fence.js', 'js/loc-cache.js', 'js/push.js',
   'js/algo/wgs2gcj.js', 'js/algo/imufilter.js', 'js/algo/stepcount.js',
   'js/algo/attitude.js', 'js/algo/alg.js',
   'js/api/rsa-pkcs1.js', 'js/api/aircloud.js'
@@ -57,6 +81,7 @@ function ok(cond, name) {
 function eq(a, b, name) { ok(JSON.stringify(a) === JSON.stringify(b), name + ' (got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b) + ')'); }
 
 const CFG = global.CFG, U = global.Utils, AC = global.AC, Algo = global.Algo, FenceStore = global.FenceStore, PetStore = global.PetStore;
+const Theme = global.Theme, Push = global.Push, LocCache = global.LocCache;
 
 /* ================= 认证与请求层 ================= */
 
@@ -227,17 +252,215 @@ return AC.request('/list_my_projects', {}).then(r => {
   ok(p1.name === '未命名设备', 'T64 自动建档未命名');
   ok(U.esc('<b>&"\'') === '&lt;b&gt;&amp;&quot;&#39;', 'T65 esc 转义');
 
-  /* ================= 汇总 ================= */
-  console.log('');
-  console.log('======== 冒烟测试 ========');
-  console.log('通过: ' + pass + ' / ' + (pass + fail));
-  if (fail > 0) {
-    console.log('失败项：');
-    failures.forEach(f => console.log('  ✗ ' + f));
-    process.exit(1);
-  } else {
-    console.log('全部通过 ✓');
+  /* ================= 轨迹精细度：1294 逐包展开 ================= */
+  // 构造 10 个 10B 样本的一包 1294（dlng=+100、dlat=+50、speed=15、course=900、alt=50）
+  const pkt = [];
+  for (let i = 0; i < 10; i++) {
+    pkt.push(...i16(100), ...i16(50), ...i16(15), ...i16(900), ...i16(50));
   }
+  const gnssHex = pkt.map(b => b.toString(16).padStart(2, '0')).join('');
+  ok(gnssHex.length === 200, 'T66 1294 报文长度 100B/10 样本');
+
+  storeMap['my_auth'] = JSON.stringify({ token: 'TK9', salt: 'S9' });
+  storeMap['my_service'] = JSON.stringify({ sid: 'SID9' });
+  fetchImpl = (url) => {
+    if (url.indexOf('location_history') >= 0) {
+      return Promise.resolve({ text: () => Promise.resolve(JSON.stringify({
+        code: 0, value: { total: '1', records: [{ lng: 104.0, lat: 30.0, time: '2026-09-10 10:00:00' }] }
+      })) });
+    }
+    return Promise.resolve({ text: () => Promise.resolve(JSON.stringify({
+      code: 0, value: {
+        total: '1', current: 1, pages: 1,
+        records: [{ ct: '2026-09-10 10:00:00', val_512: 104.0, val_513: 30.0, val_1294: gnssHex }]
+      }
+    })) });
+  };
+  return AC.getTrack('861234567890123', '2026-09-10 00:00:00', '2026-09-10 23:59:59', {}).then(pts => {
+    const gnss = pts.filter(p => p.source === 'gnss');
+    ok(gnss.length === 10, 'T67 1294 展开为 10 个精细点 (got ' + gnss.length + ')');
+    ok(pts.length === 11, 'T68 轨迹总点数 = 历史 1 + 精细 10 (got ' + pts.length + ')');
+    ok(Math.abs(gnss[0].lng - 104.00001) < 1e-9, 'T69 首个精细点经度差分解算正确');
+    ok(gnss.every(p => p.coord === 'gcj02'), 'T70 精细点坐标标记 GCJ02');
+    ok(gnss[0].ts > 0 && gnss[9].ts > gnss[0].ts, 'T71 精细点时间递增，排序稳定');
+
+    /* ================= 主题（配色 + 明暗） ================= */
+
+    // CSS 与 JS 的预设必须一一对应：只改一边会「选得中、样式不生效」
+    const cssText = fs.readFileSync(path.join(ROOT, 'css/style.css'), 'utf8');
+    const cssKeys = (cssText.match(/\[data-accent="\w+"\]/g) || [])
+      .map(m => m.match(/"(\w+)"/)[1]);
+    const jsKeys = Theme.PRESETS.map(p => p.key);
+    ok(cssKeys.length === jsKeys.length && jsKeys.every(k => cssKeys.indexOf(k) >= 0),
+      'T72 CSS 与 theme.js 的配色预设一一对应 (css=' + cssKeys.length + ' js=' + jsKeys.length + ')');
+
+    // 每个预设必须自带完整色阶，且 600（主色）与 theme.js 的 swatch 相同。
+    // 漏 --brand-600 会退化成「只有浅色底变了、主色还是默认靛蓝」= 主题看着没生效。
+    let stepBad = [], swatchBad = [];
+    Theme.PRESETS.forEach(p => {
+      const m = cssText.match(new RegExp('\\[data-accent="' + p.key + '"\\] \\{([\\s\\S]*?)\\n\\}'));
+      if (!m) { stepBad.push(p.key + ':缺块'); return; }
+      const body = m[1];
+      ['50', '100', '200', '300', '400', '500', '600', '700', '800'].forEach(n => {
+        if (body.indexOf('--brand-' + n + ':') < 0) stepBad.push(p.key + ':' + n);
+      });
+      const six = body.match(/--brand-600:\s*([^;]+);/);
+      if (!six || six[1].trim().toUpperCase() !== p.swatch.toUpperCase()) {
+        swatchBad.push(p.key + '(' + (six ? six[1].trim() : '无') + '≠' + p.swatch + ')');
+      }
+    });
+    ok(stepBad.length === 0, 'T73 每套配色色阶齐备 50~800' + (stepBad.length ? ' 缺:' + stepBad.join(',') : ''));
+    ok(swatchBad.length === 0, 'T74 预设主色 brand-600 与选择器色块一致' + (swatchBad.length ? ' 差异:' + swatchBad.join(' ') : ''));
+
+    Theme.setAccent('teal');
+    ok(Theme.accent() === 'teal' && localStorageStub.getItem('pt_accent') === 'teal',
+      'T75 setAccent 写入 localStorage');
+    ok(document.documentElement.getAttribute('data-accent') === 'teal',
+      'T76 setAccent 落到 <html data-accent>');
+    Theme.setAccent('不存在的配色');
+    ok(Theme.accent() === Theme.DEFAULT_ACCENT, 'T77 非法配色回落默认');
+
+    Theme.setMode('dark');
+    ok(document.documentElement.getAttribute('data-theme') === 'dark' && Theme.mode() === 'dark',
+      'T78 setMode 落盘 data-theme=dark');
+    ok(Theme.toggleMode() === 'light' && Theme.mode() === 'light', 'T79 toggleMode 往返正常');
+    Theme.setMode('乱填');
+    ok(Theme.mode() === Theme.DEFAULT_MODE, 'T80 非法明暗值回落默认');
+
+    ok(Theme.cssVar('--brand-600', '#000') === '#0D9488', 'T81 cssVar 读到当前主题主色');
+    ok(Theme.cssVar('--not-exist', '#ABCDEF') === '#ABCDEF', 'T82 cssVar 取不到时用兜底值');
+
+    // 防闪脚本必须与 theme.js 用同一批存储键，否则会先闪一帧默认配色
+    const tplText = fs.readFileSync(path.join(ROOT, 'index.tpl.html'), 'utf8');
+    ok(tplText.indexOf("getItem('pt_accent')") > 0 && tplText.indexOf("getItem('pt_theme_mode')") > 0,
+      'T83 index.tpl.html 防闪脚本读同一批主题键');
+    ok(CFG.KEY_ACCENT === 'pt_accent' && CFG.KEY_THEME_MODE === 'pt_theme_mode' && CFG.KEY_PUSH === 'pt_push',
+      'T84 主题/推送存储键与防闪脚本一致');
+
+    /* ================= 报警消息推送 ================= */
+
+    const nativeCalls = [];
+    delete global.AndroidBridge;
+    Push.setEnabled(false);
+    ok(Push.supported().native === false, 'T85 无 AndroidBridge 时原生通道不可用');
+    ok(Push.channelName().indexOf('应用内') >= 0, 'T86 无系统通道时回落到应用内提示');
+
+    global.AndroidBridge = {
+      notify(t, b, h) { nativeCalls.push({ t: t, b: b, h: h }); },
+      requestNotifyPermission() { nativeCalls.push({ perm: true }); }
+    };
+    Push._reset();
+    ok(Push.supported().native === true, 'T87 有 AndroidBridge.notify 时原生通道可用');
+    ok(Push.channelName().indexOf('原生') >= 0, 'T88 通道名显示 APP 原生通知');
+
+    Push.setEnabled(false);
+    ok(Push.enabled() === false, 'T89 推送默认关闭（需用户显式开启）');
+    Push.setEnabled(true);
+    ok(Push.enabled() === true && localStorageStub.getItem('pt_push') === '1', 'T90 开启开关写 pt_push=1');
+
+    Push.setEnabled(false);
+    ok(Push.alarm({ imei: '861', fenceId: 'f1', lng: 1, lat: 2 }, { name: '家' }, '布丁') === 'off',
+      'T91 开关关闭时不推送');
+
+    Push.setEnabled(true);
+    Push._reset();
+    nativeCalls.length = 0;
+    document.hidden = false;
+    ok(Push.alarm({ imei: '861', fenceId: 'f1', lng: 1, lat: 2 }, { name: '家' }, '布丁') === 'foreground',
+      'T92 页面在前台时只走应用内提示');
+    ok(nativeCalls.length === 0, 'T93 前台不产生系统通知（不重复打扰）');
+
+    document.hidden = true;
+    Push._reset();
+    nativeCalls.length = 0;
+    const rPush = Push.alarm(
+      { imei: '862', fenceId: 'f2', lng: 3, lat: 4, address: '成都市' }, { name: '公司' }, '布丁');
+    ok(rPush === 'native' && nativeCalls.length === 1, 'T94 后台越界走原生通知');
+    ok(nativeCalls[0] && nativeCalls[0].t.indexOf('越界') >= 0 &&
+      nativeCalls[0].b.indexOf('公司') >= 0 && nativeCalls[0].b.indexOf('布丁') >= 0 &&
+      nativeCalls[0].b.indexOf('成都市') >= 0,
+      'T95 通知文案含围栏/设备/地址');
+    ok(nativeCalls[0] && nativeCalls[0].h === '#/alerts', 'T96 通知带跳转 hash #/alerts');
+
+    ok(Push.alarm({ imei: '862', fenceId: 'f2', lng: 3, lat: 4 }, { name: '公司' }, '布丁') === 'dup' &&
+      nativeCalls.length === 1, 'T97 同一设备+围栏去重，不刷屏');
+
+    // 未命名设备只写「未命名设备」的话，通知栏里认不出是哪一台 —— 必须带 IMEI 尾号
+    // （放在去重用例之后，避免 _reset() 把去重表清掉导致 T97 失效）
+    Push._reset();
+    nativeCalls.length = 0;
+    Push.alarm({ imei: '861234567890999', fenceId: 'f9', lng: 1, lat: 2 },
+      { name: '公司' }, CFG.DEV_PLACEHOLDER_NAME);
+    ok(nativeCalls[0] && nativeCalls[0].b.indexOf('尾号890999') >= 0,
+      'T97b 未命名设备的通知带 IMEI 尾号 (got ' + (nativeCalls[0] ? nativeCalls[0].b : '-') + ')');
+
+    global.AndroidBridge = { notify() { throw new Error('boom'); } };
+    Push._reset();
+    ok(Push.alarm({ imei: '863', fenceId: 'f3', lng: 5, lat: 6 }, { name: '公园' }, '布丁') === 'none',
+      'T98 原生桥异常时降级为 none，不把异常抛给调用方');
+
+    global.AndroidBridge = { notify(t, b, h) { nativeCalls.push({ t: t, b: b, h: h }); } };
+    nativeCalls.length = 0;
+    Push.setEnabled(false);
+    ok(Push.test() === 'native' && nativeCalls.length === 1, 'T99 测试推送不受开关限制');
+    ok(typeof Push.requestPermission === 'function', 'T100 提供授权申请入口');
+    document.hidden = false;
+    Push._reset();
+
+    /* ================= 定位缓存（LocCache） ================= */
+
+    LocCache.clear();
+    ok(!LocCache.get('860000000000001'), 'T101 无缓存返回 null');
+    ok(LocCache.put({ imei: '860000000000001', lng: 104.1, lat: 30.5, ts: 1000, name: '布丁', _cached: false }) === true,
+      'T102 put 有效定位成功');
+    const c1 = LocCache.get('860000000000001');
+    ok(c1 && c1.lng === 104.1 && c1.lat === 30.5, 'T103 get 取回缓存定位');
+    ok(c1 && c1._cached === undefined, 'T104 渲染标记 _cached 不落盘');
+    ok(LocCache.put({ imei: '860000000000001', lng: 104.2, lat: 30.6, ts: 500 }) === false,
+      'T105 ts 更旧的状态不覆盖新缓存');
+    ok(LocCache.get('860000000000001').lng === 104.1, 'T106 旧包不回退定位');
+    ok(LocCache.put({ imei: '860000000000001', lng: 104.3, lat: 30.7, ts: 2000 }) === true &&
+       LocCache.get('860000000000001').lng === 104.3, 'T107 ts 更新的状态正常覆盖');
+    ok(LocCache.put({ imei: '860000000000002' }) === false &&
+       !LocCache.get('860000000000002'), 'T108 无经纬度不缓存（防「暂无定位」缓存假象）');
+    for (let i = 0; i < 55; i++) {
+      LocCache.put({ imei: 'bulk' + i, lng: 104 + i * 0.01, lat: 30, ts: 3000 + i });
+    }
+    const bulkKeys = Object.keys(JSON.parse(storeMap['pt_loc_cache']));
+    ok(bulkKeys.length <= 50, 'T109 缓存条目有上限淘汰 (got ' + bulkKeys.length + ')');
+    // 上限淘汰按 t 从旧到新删：最早的 bulk0..4 与更早的测试条目已被淘汰，最新的必须还在
+    ok(!!LocCache.get('bulk54') && !!LocCache.get('bulk53'), 'T110 淘汰只删最旧、保留最新');
+    LocCache.drop('bulk54');
+    ok(!LocCache.get('bulk54') && !!LocCache.get('bulk53'), 'T111 drop 单台清除');
+    LocCache.clear();
+    ok(storeMap['pt_loc_cache'] === undefined, 'T112 clear 清空缓存');
+    ok(CFG.KEY_LOC_CACHE === 'pt_loc_cache', 'T113 定位缓存存储键');
+    ok(LocCache.hasValidLoc({ lng: NaN, lat: 30 }) === false, 'T114 非法坐标判无效');
+
+    /* ================= 围栏指定生效设备 ================= */
+
+    const fT = FenceStore.add({ kind: 'circle', name: '家', center: [104, 30], radius: 200, imeis: ['861', '862'] });
+    ok(FenceStore.get(fT.id) && FenceStore.get(fT.id).imeis.join(',') === '861,862',
+      'T115 围栏 imeis 字段落盘');
+    ok(FenceStore.targetsImei(fT, '861') && FenceStore.targetsImei(fT, 862) === true,
+      'T116a 指定围栏命中列表内设备（数字 imei 兼容）');
+    ok(!FenceStore.targetsImei(fT, '863'), 'T116b 指定围栏不命中列表外设备');
+    const fAll = FenceStore.add({ kind: 'circle', name: '旧围栏', center: [104, 30], radius: 200 });
+    ok(FenceStore.targetsImei(fAll, 'anything'), 'T117 无 imeis 的旧围栏对全部设备生效（向后兼容）');
+    FenceStore.remove(fT.id); FenceStore.remove(fAll.id);
+
+    /* ================= 汇总 ================= */
+    console.log('');
+    console.log('======== 冒烟测试 ========');
+    console.log('通过: ' + pass + ' / ' + (pass + fail));
+    if (fail > 0) {
+      console.log('失败项：');
+      failures.forEach(f => console.log('  ✗ ' + f));
+      process.exit(1);
+    } else {
+      console.log('全部通过 ✓');
+    }
+  });
 })['catch'](e => {
   console.error('测试执行异常：', e);
   process.exit(1);

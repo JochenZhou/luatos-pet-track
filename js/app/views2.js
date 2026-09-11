@@ -4,6 +4,9 @@
  */
 (function (global) {
   'use strict';
+  // 主题取色：地图/Canvas 画在 DOM 之外，拿不到 var()，必须显式取色。
+  // 取不到 Theme 时退回原硬编码值，保证 theme.js 未加载也不影响绘制。
+  var TH = global.Theme || { cssVar: function (n, f) { return f; } };
   var U = global.Utils;
   var CFG = global.CFG;
   var AC = global.AC;
@@ -92,7 +95,13 @@
         }
         drawTrack(trData.points);
         document.getElementById('tr-play').disabled = false;
-        U.toast('共 ' + trData.points.length + ' 个轨迹点');
+        // 反馈精细度构成，便于判断 1294 差分点是否生效
+        var gnss = 0;
+        for (var i = 0; i < trData.points.length; i++) {
+          if (trData.points[i].source === 'gnss') gnss++;
+        }
+        trData.gnssCount = gnss;
+        U.toast('共 ' + trData.points.length + ' 个轨迹点' + (gnss ? '（含 ' + gnss + ' 个 GNSS 精细点）' : ''));
       });
     });
 
@@ -123,10 +132,18 @@
         path.push(c);
       }
     });
+    // 展开 1294 后点数可达数千；极端情况下等距抽稀，避免渲染卡顿
+    if (path.length > 20000) {
+      var thin = [];
+      var stride = Math.ceil(path.length / 20000);
+      for (var k = 0; k < path.length; k += stride) thin.push(path[k]);
+      thin.push(path[path.length - 1]);
+      path = thin;
+    }
     if (path.length) {
-      MapKit.addTemp({ kind: 'polyline', points: path, color: '#2f7bff', weight: 4, opacity: 0.85 });
-      MapKit.addTemp({ kind: 'dot', point: path[0], radius: 8, color: '#1abc5a' });
-      MapKit.addTemp({ kind: 'dot', point: path[path.length - 1], radius: 8, color: '#e74c3c' });
+      MapKit.addTemp({ kind: 'polyline', points: path, color: '--brand-600', weight: 4, opacity: 0.85 });
+      MapKit.addTemp({ kind: 'dot', point: path[0], radius: 8, color: '--ok' });
+      MapKit.addTemp({ kind: 'dot', point: path[path.length - 1], radius: 8, color: '--danger' });
       MapKit.fitBounds(path, { padding: 40 });
     }
   }
@@ -138,7 +155,7 @@
     var pts = trData.points.filter(function (p) { return isFinite(p.lng) && isFinite(p.lat); });
     if (!pts.length) return;
     var idx = 0;
-    var m = MapKit.addTemp({ kind: 'dot', point: [pts[0].lng, pts[0].lat], radius: 7, color: '#ff9f43' });
+    var m = MapKit.addTemp({ kind: 'dot', point: [pts[0].lng, pts[0].lat], radius: 7, color: '--warn' });
     trData.marker = m;
     // 回放倍率（speed 由 UI 控制，默认 120）
     var speed = trData.speed || 120;
@@ -160,6 +177,17 @@
 
   /* ================= #/fence 电子围栏 ================= */
 
+  /** 两点球面距离（米） */
+  function distanceM(lng1, lat1, lng2, lat2) {
+    var R = 6371000;
+    var dLat = (lat2 - lat1) * Math.PI / 180;
+    var dLng = (lng2 - lng1) * Math.PI / 180;
+    var la1 = lat1 * Math.PI / 180, la2 = lat2 * Math.PI / 180;
+    var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
   function renderFence() {
     Views.state.view = 'fence';
     Views.activeNav('fence');
@@ -169,12 +197,17 @@
       '  <div id="fence-map" class="map-full"></div>' +
       '  <aside class="fence-panel">' +
       '    <div class="fp-cards">' +
-      '      <button id="f-circle" class="fp-btn-card"><span class="fp-ic">⭕</span><b>圆形围栏</b><i>点选圆心，再点定半径</i></button>' +
-      '      <button id="f-polygon" class="fp-btn-card"><span class="fp-ic">⬠</span><b>多边形围栏</b><i>依次加点，双击完成</i></button>' +
+      '      <button id="f-circle" class="fp-btn-card"><span class="fp-ic">⭕</span><b>圆形围栏</b><i>点圆心 → 点半径</i></button>' +
+      '      <button id="f-polygon" class="fp-btn-card"><span class="fp-ic">⬠</span><b>多边形围栏</b><i>依次点顶点 → 完成</i></button>' +
       '    </div>' +
       '  </aside>' +
       '  <div id="fence-list" class="fence-list"></div>' +
       '  <div id="fence-tip" class="fence-tip hidden"></div>' +
+      '  <div id="fence-actions" class="fence-actions hidden">' +
+      '    <button id="f-undo" class="btn sm ghost hidden">↩ 撤销一点</button>' +
+      '    <button id="f-cancel" class="btn sm ghost">取消</button>' +
+      '    <button id="f-done" class="btn sm hidden">✓ 完成绘制</button>' +
+      '  </div>' +
       '</div>';
     Views.clearTimers();
 
@@ -184,15 +217,76 @@
 
     var st = { mode: 'idle', circleCenter: null, polyPoints: [], preview: null, previewCircle: null };
 
+    // 保存围栏时要选「针对哪台设备」，设备列表走缓存（60s TTL），进页面就预热
+    var fenceDevices = [];
+    Views.loadDevices().then(function (ds) { fenceDevices = ds || []; })['catch'](function () { /* ignore */ });
+
+    function $(id) { return document.getElementById(id); }
+
+    /**
+     * 围栏保存弹窗：名称输入 + 生效设备多选。
+     * ID 沿用 dlg-input / dlg-ok / dlg-cancel（离线验证 harness 按这三个 ID 驱动）。
+     * 不勾任何设备 = 对全部设备生效（兼容旧数据）。
+     */
+    function fenceSaveDialog(opts, onOk) {
+      var rows = fenceDevices.map(function (d) {
+        return '<label class="fd-item">' +
+          '<input type="checkbox" value="' + U.esc(d.deviceid) + '">' +
+          '<span>' + U.esc(PetStore.nameOf(d.deviceid)) + '</span>' +
+          '<i>' + U.esc(d.deviceid) + '</i></label>';
+      }).join('');
+      var body =
+        '<div class="form">' +
+        '  <label>围栏名称</label>' +
+        '  <input id="dlg-input" type="text" value="' + U.esc(opts.nameValue || '') + '">' +
+        (opts.hint ? '  <div class="mute" style="margin-top:4px">' + U.esc(opts.hint) + '</div>' : '') +
+        '</div>' +
+        '<div class="fd-head">生效设备</div>' +
+        '<div class="fd-sub">不勾选 = 对全部设备生效</div>' +
+        '<div class="fd-list">' + (rows || '<div class="fd-empty">设备列表加载中…（保存后仍可生效于全部设备）</div>') + '</div>';
+      var box = Views.modal(opts.title || '保存围栏', body,
+        '<button class="btn ghost" id="dlg-cancel">取消</button>' +
+        '<button class="btn" id="dlg-ok">' + U.esc(opts.okText || '保存围栏') + '</button>');
+      var input = box.querySelector('#dlg-input');
+      var okBtn = box.querySelector('#dlg-ok');
+      function finish(save) {
+        if (!box.parentNode) return;
+        box.parentNode.removeChild(box);
+        if (!save) return;
+        var imeis = [];
+        Array.prototype.forEach.call(box.querySelectorAll('.fd-item input:checked'), function (cb) {
+          imeis.push(cb.value);
+        });
+        onOk(input ? input.value.trim() : '', imeis);
+      }
+      var x = box.querySelector('.modal-close');
+      if (x) x.addEventListener('click', function () { finish(false); });
+      box.addEventListener('click', function (e) { if (e.target === box) finish(false); });
+      var cancel = box.querySelector('#dlg-cancel');
+      if (cancel) cancel.addEventListener('click', function () { finish(false); });
+      if (okBtn) okBtn.addEventListener('click', function () { finish(true); });
+      if (input) setTimeout(function () { try { input.focus(); input.select(); } catch (e) { /* ignore */ } }, 60);
+    }
+
     function tip(msg) {
-      var el = document.getElementById('fence-tip');
+      var el = $('fence-tip');
       if (!el) return;
       el.textContent = msg;
       el.classList.remove('hidden');
     }
     function hideTip() {
-      var el = document.getElementById('fence-tip');
+      var el = $('fence-tip');
       if (el) el.classList.add('hidden');
+    }
+    /** 绘制期操作条：按模式显示「撤销一点 / 取消 / 完成绘制」 */
+    function showActions(opts) {
+      var bar = $('fence-actions');
+      if (!bar) return;
+      if (!opts) { bar.classList.add('hidden'); return; }
+      bar.classList.remove('hidden');
+      var undo = $('f-undo'), done = $('f-done');
+      if (undo) undo.classList[opts.undo ? 'remove' : 'add']('hidden');
+      if (done) done.classList[opts.done ? 'remove' : 'add']('hidden');
     }
 
     function resetMode() {
@@ -202,18 +296,59 @@
       if (st.preview) { st.preview.remove(); st.preview = null; }
       if (st.previewCircle) { st.previewCircle.remove(); st.previewCircle = null; }
       hideTip();
+      showActions(null);
     }
 
-    document.getElementById('f-circle').addEventListener('click', function () {
+    /**
+     * 完成多边形绘制并保存
+     * 原实现只支持「双击地图完成」，触屏上双击极易与缩放/单击冲突导致围栏存不下来；
+     * 现改为显式按钮，双击仅作为桌面端的快捷方式保留。
+     */
+    function finishPolygon() {
+      if (st.mode !== 'polygon' || st.polyPoints.length < 3) {
+        U.toast('至少需要 3 个顶点', 'err');
+        return;
+      }
+      var pts = st.polyPoints.slice();
+      st.mode = 'idle';
+      showActions(null);
+      hideTip();
+      fenceSaveDialog({
+        title: '⬠ 保存多边形围栏',
+        nameValue: '我的多边形围栏',
+        hint: '共 ' + pts.length + ' 个顶点',
+        okText: '保存围栏'
+      }, function (name, imeis) {
+        FenceStore.add({ kind: 'polygon', name: name || '多边形围栏', points: pts, imeis: imeis });
+        U.toast('✅ 多边形围栏已保存' + (imeis.length ? '（针对 ' + imeis.length + ' 台设备）' : '（全部设备）'));
+        resetMode();
+        renderFenceList();
+        drawAllFences();
+      });
+    }
+
+    $('f-circle').addEventListener('click', function () {
       resetMode();
       st.mode = 'circle_center';
       tip('⭕ 请在地图上点击圆心位置');
+      showActions({});
     });
-    document.getElementById('f-polygon').addEventListener('click', function () {
+    $('f-polygon').addEventListener('click', function () {
       resetMode();
       st.mode = 'polygon';
-      tip('⬠ 依次点击加顶点，双击完成绘制');
+      tip('⬠ 依次点击加顶点（≥3 个），完成后点「完成绘制」');
+      showActions({});
     });
+    $('f-cancel').addEventListener('click', function () { resetMode(); U.toast('已取消绘制'); });
+    $('f-undo').addEventListener('click', function () {
+      if (st.mode !== 'polygon' || !st.polyPoints.length) return;
+      st.polyPoints.pop();
+      if (st.preview) st.preview.setPath(st.polyPoints);
+      var n = st.polyPoints.length;
+      tip(n >= 3 ? ('已加 ' + n + ' 个顶点，可点「完成绘制」') : ('已加 ' + n + ' 个顶点，至少需要 3 个'));
+      showActions({ undo: n > 0, done: n >= 3 });
+    });
+    $('f-done').addEventListener('click', finishPolygon);
 
     MapKit.on('click', function (e) {
       if (!MapKit.mapAlive()) return;
@@ -221,64 +356,76 @@
       if (st.mode === 'circle_center') {
         st.circleCenter = [lng, lat];
         st.mode = 'circle_radius';
-        st.preview = MapKit.addTemp({ kind: 'dot', point: [lng, lat], radius: 5, color: '#2f7bff' });
-        tip('再点一处确定半径（≥20 米）');
-      } else if (st.mode === 'circle_radius') {
-        var R = 6371000;
-        var dLat = (lat - st.circleCenter[1]) * Math.PI / 180;
-        var dLng = (lng - st.circleCenter[0]) * Math.PI / 180;
-        var la1 = st.circleCenter[1] * Math.PI / 180, la2 = lat * Math.PI / 180;
-        var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-        var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        if (dist < 20) { U.toast('半径需 ≥ 20 米', 'err'); return; }
-        var name = promptWithDefault('围栏名称：', '我的围栏');
-        if (name === null) { resetMode(); return; }
-        FenceStore.add({ kind: 'circle', name: name || '我的围栏', center: st.circleCenter, radius: Math.round(dist) });
-        U.toast('✅ 围栏已保存');
-        resetMode();
-        renderFenceList();
-        drawAllFences();
-      } else if (st.mode === 'polygon') {
-        st.polyPoints.push([lng, lat]);
-        if (!st.preview) {
-          st.preview = MapKit.addTemp({ kind: 'polyline', points: [], color: '#9b59b6', weight: 3, dash: '6 4' });
-        }
-        st.preview.setPath(st.polyPoints);
-        tip('已加 ' + st.polyPoints.length + ' 个顶点，双击地图完成');
-      }
-    });
-
-    MapKit.on('mousemove', function (e) {
-      if (st.mode === 'circle_radius' && st.circleCenter && MapKit.mapAlive()) {
-        var R = 6371000;
-        var dLat = (e.lat - st.circleCenter[1]) * Math.PI / 180;
-        var dLng = (e.lng - st.circleCenter[0]) * Math.PI / 180;
-        var la1 = st.circleCenter[1] * Math.PI / 180, la2 = e.lat * Math.PI / 180;
-        var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-        var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        st.preview = MapKit.addTemp({ kind: 'dot', point: [lng, lat], radius: 5, color: '--brand-600' });
+        // 圆心一落点就建预览圆（半径 0 起步）：触屏没有 mousemove，
+        // 不建的话第二次点击前用户完全看不到圆在长多大
         if (!st.previewCircle) {
-          st.previewCircle = MapKit.addTemp({ kind: 'circle', center: st.circleCenter, radius: dist, color: '#2f7bff', fillOpacity: 0.08 });
+          st.previewCircle = MapKit.addTemp({
+            kind: 'circle', center: [lng, lat], radius: 0,
+            color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL
+          });
+        }
+        tip('再点一处确定半径（≥20 米）；鼠标移动可实时预览大小');
+      } else if (st.mode === 'circle_radius') {
+        var dist = distanceM(st.circleCenter[0], st.circleCenter[1], lng, lat);
+        if (dist < 20) { U.toast('半径需 ≥ 20 米', 'err'); return; }
+        var radius = Math.round(dist);
+        var center = [st.circleCenter[0], st.circleCenter[1]];
+        // 定格最终半径：触屏没有 mousemove，第二击必须补上预览圆，
+        // 否则保存弹窗期间用户看到的还是「裸圆心」，不知道自己画了多大
+        if (!st.previewCircle) {
+          st.previewCircle = MapKit.addTemp({
+            kind: 'circle', center: center, radius: dist,
+            color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL
+          });
         } else {
           st.previewCircle.setRadius(dist);
         }
+        st.mode = 'idle';                     // 冻结绘制，避免弹窗期间继续改半径
+        showActions(null);
+        fenceSaveDialog({
+          title: '⭕ 保存圆形围栏',
+          nameValue: '我的围栏',
+          hint: '半径 ' + radius + ' 米 · 圆心 ' + center[0].toFixed(5) + ', ' + center[1].toFixed(5),
+          okText: '保存围栏'
+        }, function (name, imeis) {
+          FenceStore.add({ kind: 'circle', name: name || '我的围栏', center: center, radius: radius, imeis: imeis });
+          U.toast('✅ 围栏已保存' + (imeis.length ? '（针对 ' + imeis.length + ' 台设备）' : '（全部设备）'));
+          resetMode();
+          renderFenceList();
+          drawAllFences();
+        });
+      } else if (st.mode === 'polygon') {
+        st.polyPoints.push([lng, lat]);
+        if (!st.preview) {
+          st.preview = MapKit.addTemp({ kind: 'polyline', points: [], color: '--brand-500', weight: 3, dash: '6 4' });
+        }
+        st.preview.setPath(st.polyPoints);
+        var n = st.polyPoints.length;
+        tip(n >= 3 ? ('已加 ' + n + ' 个顶点，可点「完成绘制」') : ('已加 ' + n + ' 个顶点，至少需要 3 个'));
+        showActions({ undo: true, done: n >= 3 });
+      }
+    });
+
+    /** 绘制期预览圆的填充透明度（保存后的围栏更实一些，见 map.js addFence） */
+    var FENCE_PREVIEW_FILL = 0.18;
+
+    MapKit.on('mousemove', function (e) {
+      if (st.mode === 'circle_radius' && st.circleCenter && MapKit.mapAlive()) {
+        var dist = distanceM(st.circleCenter[0], st.circleCenter[1], e.lng, e.lat);
+        if (!st.previewCircle) {
+          st.previewCircle = MapKit.addTemp({ kind: 'circle', center: st.circleCenter, radius: dist, color: '--brand-600', fillOpacity: FENCE_PREVIEW_FILL });
+        } else {
+          st.previewCircle.setRadius(dist);
+        }
+        // 实时报半径：用户拖动时能直接看到「这个围栏大概多大」
+        tip('半径约 ' + Math.round(dist) + ' 米 · 点击地图确定（≥20 米）');
       }
     });
 
     MapKit.on('dblclick', function () {
-      if (st.mode === 'polygon' && st.polyPoints.length >= 3) {
-        var name = promptWithDefault('围栏名称：', '我的多边形围栏');
-        if (name === null) { resetMode(); return; }
-        FenceStore.add({ kind: 'polygon', name: name || '多边形围栏', points: st.polyPoints.slice() });
-        U.toast('✅ 多边形围栏已保存');
-        resetMode();
-        renderFenceList();
-        drawAllFences();
-      }
+      if (st.mode === 'polygon' && st.polyPoints.length >= 3) finishPolygon();
     });
-  }
-
-  function promptWithDefault(msg, def) {
-    try { return global.prompt(msg, def); } catch (e) { return null; }
   }
 
   function drawAllFences() {
@@ -301,9 +448,20 @@
     if (!list.length) { box.innerHTML = '<div class="empty-card">暂无围栏</div>'; box.style.display = 'none'; return; }
     box.style.display = '';
     box.innerHTML = list.map(function (f) {
+      // 生效设备：空 = 全部设备；多台超 2 个折叠显示，避免列表撑爆
+      var imeis = (f.imeis || []).map(String);
+      var target;
+      if (!imeis.length) {
+        target = '全部设备';
+      } else if (imeis.length <= 2) {
+        target = imeis.map(function (i) { return PetStore.nameOf(i); }).join('、');
+      } else {
+        target = PetStore.nameOf(imeis[0]) + ' 等 ' + imeis.length + ' 台';
+      }
       return '<div class="fl-item" data-id="' + U.esc(f.id) + '">' +
         '<div class="fl-main"><b>' + U.esc(f.name) + '</b><span class="fl-sub">' +
         (f.kind === 'circle' ? '⭕ 圆形 · ' + f.radius + 'm' : '⬠ 多边形 · ' + (f.points || []).length + ' 点') +
+        ' · 🐾 ' + U.esc(target) +
         '</span></div>' +
         '<div class="fl-acts">' +
         '<button class="btn xs" data-act="toggle">' + (f.enabled ? '停用' : '启用') + '</button>' +
@@ -326,11 +484,18 @@
             var c = f.kind === 'circle' ? f.center : f.points[0];
             if (c && MapKit.mapAlive()) MapKit.focusPoint(c, 15);
           } else if (act === 'del') {
-            if (global.confirm('删除围栏「' + (f && f.name) + '」？')) {
+            Views.confirmDialog({
+              title: '🗑 删除围栏',
+              html: '确定删除围栏「<b>' + U.esc(f ? f.name : '') + '</b>」吗？<br>' +
+                    '<span class="mute">该围栏的越界报警记录会保留在报警列表中。</span>',
+              okText: '删除',
+              danger: true
+            }, function () {
               FenceStore.remove(id);
               renderFenceList();
               drawAllFences();
-            }
+              U.toast('已删除围栏');
+            });
           }
         });
       });
@@ -343,10 +508,68 @@
     Views.state.view = 'alerts';
     Views.activeNav('alerts');
     var root = document.getElementById('view-root');
-    root.innerHTML = '<div class="page"><h2>🚨 越界报警</h2><div id="al-list"></div></div>';
+    root.innerHTML =
+      '<div class="page">' +
+      '  <h2>🚨 越界报警</h2>' +
+      '  <div id="push-row"></div>' +
+      '  <div id="al-list"></div>' +
+      '</div>';
     Views.clearTimers();
+    renderPushRow();
     renderAlertsList();
     Views.state.timers.push(setInterval(renderAlertsList, 15000));
+  }
+
+  /**
+   * 推送设置行：开关 + 测试
+   * 测试按钮不受开关限制，方便用户先确认通道是否通，再决定开不开。
+   */
+  function renderPushRow() {
+    var box = document.getElementById('push-row');
+    if (!box) return;
+    var on = global.Push ? Push.enabled() : false;
+    var ch = global.Push ? Push.channelName() : '不可用';
+    box.innerHTML =
+      '<div class="push-row">' +
+      '  <div class="pr-main">' +
+      '    <b>报警消息推送</b>' +
+      '    <div class="pr-sub">' + (on ? '已开启' : '已关闭') + ' · 通道：' + U.esc(ch) + '</div>' +
+      '  </div>' +
+      '  <div class="pr-side">' +
+      '    <button class="btn sm" type="button" id="push-test">测试</button>' +
+      '    <button class="switch' + (on ? ' on' : '') + '" type="button" id="push-switch"' +
+      ' role="switch" aria-checked="' + (on ? 'true' : 'false') + '" aria-label="报警消息推送"></button>' +
+      '  </div>' +
+      '</div>';
+
+    var sw = document.getElementById('push-switch');
+    if (sw) {
+      sw.addEventListener('click', function () {
+        var next = !Push.enabled();
+        Push.setEnabled(next);
+        renderPushRow();          // 先立即重绘：开关要马上给出视觉反馈
+        if (next) {
+          // 浏览器通道需要用户授权；APP 原生通道无需授权。
+          // 授权结论回来后刷新一次通道文案。
+          Push.requestPermission()['catch'](function () { return null; })['then'](function () {
+            renderPushRow();
+          });
+          U.toast('✅ 已开启报警推送（' + Push.channelName() + '）');
+        } else {
+          U.toast('已关闭报警推送');
+        }
+      });
+    }
+
+    var t = document.getElementById('push-test');
+    if (t) {
+      t.addEventListener('click', function () {
+        var used = Push.test();
+        if (used === 'native') U.toast('已推送到系统通知栏，请下拉查看');
+        else if (used === 'web') U.toast('已通过浏览器通知发送');
+        else U.toast('当前环境不支持系统通知（WebView 需走 APP 端），仅能应用内提示', 'err');
+      });
+    }
   }
 
   function renderAlertsList() {
@@ -597,7 +820,7 @@
         U.$all('.db-canvas', box).forEach(function (cv) {
           var k = cv.getAttribute('data-k');
           var series = k === 'sig' ? thinSeries(sig) : thinSeries(vbat);
-          drawLineChart(cv, series, { color: k === 'sig' ? '#2f7bff' : '#27ae60' });
+          drawLineChart(cv, series, { color: k === 'sig' ? TH.cssVar('--brand-600', '#4F46E5') : TH.cssVar('--ok', '#10B981') });
         });
       };
       if (typeof global.requestAnimationFrame === 'function') {
@@ -635,7 +858,7 @@
 
   function drawLineChart(canvas, data, opts) {
     opts = opts || {};
-    var color = opts.color || '#2f7bff';
+    var color = opts.color || TH.cssVar('--brand-600', '#4F46E5');
     if (!canvas || !data || data.length < 2) return;
     var dpr = global.devicePixelRatio || 1;
     var cssW = canvas.clientWidth || 600;
@@ -664,7 +887,7 @@
     function Y(v) { return padT + (1 - (v - min) / (max - min)) * plotH; }
 
     // 背景
-    ctx.fillStyle = '#fbfcfe';
+    ctx.fillStyle = '#FAFBFE';
     ctx.fillRect(0, 0, cssW, cssH);
 
     // 横向网格 + y 轴刻度
@@ -674,15 +897,15 @@
     for (i = 0; i <= steps; i++) {
       var v = max - (max - min) * i / steps;
       var y = Y(v);
-      ctx.strokeStyle = '#eef2f7';
+      ctx.strokeStyle = '#E8ECF4';
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(cssW - padR, y); ctx.stroke();
-      ctx.fillStyle = '#9aa3b2';
+      ctx.fillStyle = '#8B96AB';
       ctx.textAlign = 'left';
       ctx.fillText(String(Math.round(v)), 4, y + 3);
     }
 
     // x 轴刻度（首/中/尾，本地钟面直出）
-    ctx.fillStyle = '#9aa3b2';
+    ctx.fillStyle = '#8B96AB';
     ctx.textAlign = 'left';
     ctx.fillText(tickLabel(t0), padL, cssH - 6);
     ctx.textAlign = 'center';

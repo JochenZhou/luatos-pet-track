@@ -3,7 +3,7 @@
     android:id="@+id/drawer"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#f4f6fb">
+    android:background="#F5F7FB">
 
     <!-- 主内容区 -->
     <FrameLayout
@@ -22,7 +22,7 @@
             android:layout_height="3dp"
             android:layout_gravity="top"
             android:max="100"
-            android:progressTint="#2f7bff" />
+            android:progressTint="#4F46E5" />
     </FrameLayout>
 
     <!-- 侧边栏抽屉 -->
@@ -34,30 +34,37 @@
         android:orientation="vertical"
         android:background="#ffffff">
 
-        <!-- 头部 -->
+        <!-- 头部：品牌 logo + 名称 -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="150dp"
+            android:layout_height="172dp"
             android:orientation="vertical"
             android:gravity="bottom"
             android:padding="20dp"
             android:background="@drawable/bg_drawer_header">
 
+            <ImageView
+                android:layout_width="46dp"
+                android:layout_height="46dp"
+                android:layout_marginBottom="12dp"
+                android:contentDescription="@string/app_name"
+                android:src="@mipmap/ic_launcher" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="合宙运动传感器"
+                android:text="合宙IoT-运动传感器"
                 android:textColor="#ffffff"
-                android:textSize="20sp"
+                android:textSize="19sp"
                 android:textStyle="bold" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="5dp"
                 android:text="设备定位与状态管理"
-                android:textColor="#cfe0ff"
-                android:textSize="13sp" />
+                android:textColor="#CFFAF5"
+                android:textSize="12.5sp" />
         </LinearLayout>
 
         <!-- 菜单列表（Java 动态填充） -->

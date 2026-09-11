@@ -2,6 +2,9 @@ package com.jochen.luatos_pet_track;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -25,6 +28,9 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -63,6 +69,18 @@ public class MainActivity extends Activity {
     private ProgressBar progressBar;
     private DrawerLayout drawer;
 
+    /* ---------------- 报警消息推送 ---------------- */
+    private static final String CHANNEL_ID = "pettrack_alarm";
+    private static final String CHANNEL_NAME = "越界报警";
+    private static final int NOTIFY_ID = 1001;
+    private static final int REQ_NOTIFY_PERM = 13;
+    /** 点通知要跳转的 hash 路由（通知点击 → 应用内跳到报警页） */
+    private static final String EXTRA_HASH = "pettrack_hash";
+    /** 网页端已加载完 index.html 之前收到的跳转请求，先存着，onPageFinished 再执行 */
+    private String pendingHash = null;
+    /** Android 13+ 未授权通知时，把这条报警暂存下来，授权通过后补发 */
+    private String[] deferredNotify = null;
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,6 +90,8 @@ public class MainActivity extends Activity {
         webView = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress);
         drawer = findViewById(R.id.drawer);
+
+        createNotifyChannel();
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -105,6 +125,7 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 updateAppMenuLayout(url);
                 injectSaveHook();
+                applyPendingHash();      // 通知点击带来的跳转，等页面就绪后再执行
             }
 
             @Override
@@ -142,6 +163,99 @@ public class MainActivity extends Activity {
         } else {
             webView.loadUrl(LOGIN_URL);
         }
+        handleIntentHash(getIntent());
+    }
+
+    /* ================= 报警消息推送 ================= */
+
+    /** 通知渠道（Android 8.0+ 必须先建渠道，否则通知会被静默丢弃） */
+    private void createNotifyChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm == null || nm.getNotificationChannel(CHANNEL_ID) != null) return;
+        NotificationChannel ch = new NotificationChannel(
+                CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH);
+        ch.setDescription("电子围栏越界等报警消息");
+        ch.enableVibration(true);
+        ch.setShowBadge(true);
+        nm.createNotificationChannel(ch);
+    }
+
+    private boolean hasNotifyPermission() {
+        if (Build.VERSION.SDK_INT < 33) return true;   // 13 以前无需运行时授权
+        return checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** 发一条系统通知；点通知会带着 hash 回到本 Activity（singleTask） */
+    private void showNotification(String title, String body, String hash) {
+        if (!hasNotifyPermission()) {
+            // 先申请授权，授权通过后在 onRequestPermissionsResult 里补发，避免用户「开了开关却没反应」
+            deferredNotify = new String[]{title, body, hash};
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY_PERM);
+            return;
+        }
+        Intent it = new Intent(this, MainActivity.class)
+                .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra(EXTRA_HASH, hash == null ? "" : hash);
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) piFlags |= PendingIntent.FLAG_IMMUTABLE;
+        PendingIntent pi = PendingIntent.getActivity(this, 0, it, piFlags);
+
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notify)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(pi);
+        try {
+            NotificationManagerCompat.from(this).notify(NOTIFY_ID, b.build());
+        } catch (SecurityException e) {
+            // 用户在系统设置里关掉了通知，静默即可（网页端仍有应用内提示）
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_NOTIFY_PERM) return;
+        String[] d = deferredNotify;
+        deferredNotify = null;
+        boolean ok = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (ok && d != null) {
+            showNotification(d[0], d[1], d[2]);
+        } else if (!ok) {
+            Toast.makeText(this, "未授予通知权限，报警只能在应用内查看", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** 取出通知带过来的 hash，等页面就绪后跳转 */
+    private void handleIntentHash(Intent intent) {
+        if (intent == null) return;
+        String h = intent.getStringExtra(EXTRA_HASH);
+        if (h == null || h.length() == 0) return;
+        intent.removeExtra(EXTRA_HASH);
+        pendingHash = h;
+        applyPendingHash();
+    }
+
+    private void applyPendingHash() {
+        if (pendingHash == null || webView == null) return;
+        String url = webView.getUrl();
+        if (url == null || !url.contains("index.html")) return;  // 还在登录页，等页面切换后再执行
+        String h = pendingHash;
+        pendingHash = null;
+        navigate(h);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntentHash(intent);
     }
 
     /**
@@ -158,9 +272,9 @@ public class MainActivity extends Activity {
             + "var b=document.createElement('button');b.type='button';"
             + "b.id='android-app-menu';b.className='android-app-menu';"
             + "b.setAttribute('aria-label','打开菜单');b.title='打开菜单';b.textContent='☰';"
-            + "b.style.cssText='flex:0 0 32px;width:32px;height:32px;margin:0 8px 0 0;"
-            + "padding:0;border:1px solid #e5e9f2;border-radius:10px;background:#fff;"
-            + "color:#2f7bff;font-size:18px;line-height:30px;text-align:center;"
+            + "b.style.cssText='flex:0 0 32px;width:32px;height:32px;margin:0 10px 0 0;"
+            + "padding:0;border:1px solid #E8ECF4;border-radius:12px;background:#fff;"
+            + "color:#4F46E5;font-size:18px;line-height:30px;text-align:center;"
             + "box-shadow:none;cursor:pointer;display:flex;align-items:center;"
             + "justify-content:center;';"
             + "b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();"
@@ -235,12 +349,18 @@ public class MainActivity extends Activity {
             final String hash = m[1];
             TextView item = new TextView(this);
             item.setText(m[0]);
-            item.setTextSize(16);
-            item.setTextColor(0xFF1F2937);
+            item.setTextSize(15.5f);
+            item.setTextColor(0xFF0B1220);
             item.setGravity(Gravity.CENTER_VERTICAL);
             item.setSingleLine(true);
-            item.setPadding(dp(20), dp(15), dp(20), dp(15));
+            item.setPadding(dp(20), dp(14), dp(20), dp(14));
             item.setBackgroundResource(R.drawable.menu_item_bg);
+            // 左右留边，让 12dp 圆角背景可见（与 Web 端菜单项圆角一致）
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(dp(8), dp(2), dp(8), dp(2));
+            item.setLayoutParams(lp);
             item.setOnClickListener(v -> {
                 drawer.closeDrawers();
                 navigate(hash);
@@ -255,6 +375,31 @@ public class MainActivity extends Activity {
         public void openDrawer() {
             runOnUiThread(() -> {
                 if (drawer != null) drawer.openDrawer(Gravity.START);
+            });
+        }
+
+        /**
+         * 报警消息推送（网页端 window.Push 调用）。
+         * 注意：这是对 Object.notify() 的重载（参数不同），不是覆写。
+         * WebView 不实现 Web Notification API，所以 APP 内推送只能走这里。
+         *
+         * @param hash 点击通知后要跳转的 hash 路由，如 "#/alerts"
+         */
+        @JavascriptInterface
+        public void notify(String title, String body, String hash) {
+            final String t = (title == null || title.length() == 0) ? "越界报警" : title;
+            final String b = body == null ? "" : body;
+            final String h = hash == null ? "" : hash;
+            runOnUiThread(() -> showNotification(t, b, h));
+        }
+
+        /** 用户在网页端打开推送开关时调用，提前弹出系统授权（Android 13+） */
+        @JavascriptInterface
+        public void requestNotifyPermission() {
+            runOnUiThread(() -> {
+                if (Build.VERSION.SDK_INT >= 33 && !hasNotifyPermission()) {
+                    requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY_PERM);
+                }
             });
         }
 

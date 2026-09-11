@@ -33,7 +33,7 @@
     if (!map[imei]) {
       map[imei] = {
         imei: imei,
-        name: opts.name || '未命名设备',
+        name: opts.name || CFG.DEV_PLACEHOLDER_NAME,
         auto: true,          // 自动建档标记
         updated: Date.now()
       };
@@ -60,7 +60,7 @@
     merged = U.extend(merged, profile);
     merged.imei = imei;
     merged.auto = false;   // 用户编辑后不再是自动卡
-    merged.name = merged.name || '未命名设备';
+    merged.name = merged.name || CFG.DEV_PLACEHOLDER_NAME;
     merged.updated = Date.now();
     // 待传保护：仅当本地名与云端名不同（或从未成功上传）才 pending
     if (prev.cloudName && prev.cloudName === merged.name) {
@@ -111,7 +111,7 @@
 
   function nameOf(imei) {
     var p = get(imei);
-    return p && p.name ? p.name : '未命名设备';
+    return p && p.name ? p.name : CFG.DEV_PLACEHOLDER_NAME;
   }
 
   /**

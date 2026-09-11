@@ -43,9 +43,13 @@
 
   var SHELL_HTML =
     '<header class="topbar">' +
-    '  <div class="brand"><span class="brand-dot"></span>合宙IoT-运动传感器</div>' +
+    '  <div class="brand">' +
+    '    <span class="brand-logo" role="img" aria-label="合宙IoT-运动传感器"></span>' +
+    '    <span class="brand-text"><b>合宙IoT-运动传感器</b><span>PetTrack · AirCloud</span></span>' +
+    '  </div>' +
     '  <div class="top-actions">' +
     '    <select id="project-select" class="proj-select" title="切换项目"></select>' +
+    '    <button id="btn-theme" class="theme-btn" type="button" title="外观主题" aria-label="外观主题"><i class="tb-dot"></i></button>' +
     '    <span id="user-chip" class="user-chip"></span>' +
     '    <button id="btn-logout" class="btn-ghost">退出</button>' +
     '  </div>' +
@@ -79,8 +83,18 @@
         if (sel.value) {
           AC.setProjectKey(sel.value);
           state.projectKey = sel.value;
-          if (state.view === 'home') Views.render('home', { force: true });
-          if (state.view === 'pets') Views.render('pets', { force: true });
+          // 换项目必须清空设备/状态缓存，否则会继续渲染上一个项目的设备
+          state.devices = [];
+          state.statuses = {};
+          state.statusCache = {};
+          state.devicesCache = { list: null, t: 0 };
+          if (state.view === 'home') render('home', { force: true });
+          else if (state.view === 'pets') render('pets', { force: true });
+          else if (state.view === 'devices') render('devices', { force: true });
+          else if (state.view === 'track') render('track');
+          else if (state.view === 'status') render('status');
+          else if (state.view === 'debug') render('debug');
+          else if (state.view === 'report') render('report');
         }
       });
     }
@@ -90,6 +104,10 @@
         AC.clearLoginStorage();
         AC.redirectToLogin('/' + CFG.APP_PAGE);
       });
+    }
+    // 外观主题入口（配色 + 明暗）。浮层挂 body，见 theme.js mount()
+    if (global.Theme && global.Theme.mount) {
+      global.Theme.mount(document.getElementById('btn-theme'));
     }
     var ctx = AC.getAuthContextAny();
     var chip = document.getElementById('user-chip');
@@ -205,6 +223,16 @@
     imeis.forEach(function (imei) {
       var c = state.statusCache[imei];
       var fresh = !force && c && (now - c.t < CFG.STATUS_TTL_MS);
+      if (!c) {
+        // 内存缓存没有 → 用持久化定位缓存兜底：进页面先把上次的定位画出来，
+        // 不用干等新一轮轮询（新数据回来后 t=Date.now() 的内存缓存会覆盖它）
+        var persisted = LocCache ? LocCache.get(imei) : null;
+        if (persisted) {
+          persisted.name = PetStore.nameOf(imei);   // 改名后缓存里的旧名要跟着换
+          persisted._cached = true;
+          c = state.statusCache[imei] = { st: persisted, t: 0 };  // t=0 视为过期，仍会拉新
+        }
+      }
       if (c) out[imei] = c.st;      // 有缓存先占位（新鲜 or 过期都用，避免闪烁）
       if (!fresh) toFetch.push(imei);
     });
@@ -218,6 +246,8 @@
         st.name = p.name;
         out[imei] = st;
         state.statusCache[imei] = { st: st, t: Date.now() };
+        // 新定位落持久化缓存：下次进页面秒显
+        if (LocCache) LocCache.put(st);
         onOne && onOne(imei, st);
       })['catch'](function () {
         out[imei] = { imei: imei, found: false, name: PetStore.nameOf(imei) };
@@ -262,6 +292,8 @@
             function (statuses) {           // 缓存快照 / 全部完成
               state.statuses = statuses;
               renderHomeCards(devices, statuses);
+              // 缓存快照也上地图：进页面先看到上次的定位点，不等新数据
+              for (var k in statuses) MapKit.upsertMarker(statuses[k]);
               MapKit.refreshOpenPopups();
             },
             force);
@@ -289,6 +321,8 @@
       if (!st.name) st.name = PetStore.nameOf(imei);
       var offline = st.ts ? (Date.now() - st.ts > 5 * 60 * 1000) : !st.found;
       var badge = st.found ? (offline ? '<span class="badge bad-off">离线</span>' : '<span class="badge bad-on">在线</span>') : '<span class="badge bad-off">无定位</span>';
+      // 来自持久化缓存的占位数据：明确标注「缓存」，新数据到达后该标记自然消失
+      var cachedBadge = st._cached ? '<span class="badge bad-load">缓存</span>' : '';
       var loc = st.lng !== undefined ? (Number(st.lng).toFixed(5) + ', ' + Number(st.lat).toFixed(5)) : '--';
       var addr = st.address ? U.esc(st.address) : '无地址信息';
       var bat = (st.vbatPct !== undefined && st.vbatPct !== null) ? st.vbatPct + '%' : '--';
@@ -297,24 +331,36 @@
       var low = isLowBattery(st);
       var lowBadge = low ? '<span class="badge bad-low">低电量</span>' : '';
       return '<div class="pet-card' + (low ? ' pc-low' : '') + '" data-imei="' + U.esc(imei) + '" data-zoom="15">' +
-        '<div class="pc-head"><b>' + U.esc(st.name) + '</b><span class="pc-badges">' + lowBadge + badge + '</span></div>' +
+        '<div class="pc-head"><b>' + U.esc(st.name) + '</b><span class="pc-badges">' + cachedBadge + lowBadge + badge + '</span></div>' +
         '<div class="pc-sub">' + U.esc(imei) + '</div>' +
         '<div class="pc-row">📍 ' + U.esc(loc) + '</div>' +
         '<div class="pc-row pc-addr">🏷 ' + addr + '</div>' +
         '<div class="pc-foot">🔋 ' + U.esc(bat) + (low ? ('（' + Number(st.vbat) + 'mV）') : '') + ' · 📶 ' + U.esc(sig) + ' · 🕒 ' + U.esc(upTime) + '</div>' +
         '</div>';
     }).join('');
-    box.innerHTML = html;
 
-    // hover 15 级 / click 16 级锁定
+    // 保留滚动位置：轮询/流式刷新每 10s 重建一次 DOM，不保留会让移动端列表反复跳回顶部
+    var prevScroll = box.scrollTop;
+    box.innerHTML = html;
+    if (prevScroll) box.scrollTop = prevScroll;
+
+    // 锁定态需要跨重渲染保持，否则点击后的高亮会被下一次刷新抹掉
+    var lockedImei = MapKit.locked();
+
+    // hover 15 级 / click 18 级锁定（拉开差距，点击才「看得见」放大）
     U.$all('.pet-card', box).forEach(function (card) {
+      var imei = card.getAttribute('data-imei');
+      if (lockedImei && imei === lockedImei) card.classList.add('locked');
       card.addEventListener('mouseenter', function () {
-        MapKit.focusOn(card.getAttribute('data-imei'), 15);
+        MapKit.focusOn(imei, 15);
       });
       card.addEventListener('click', function () {
-        var imei = card.getAttribute('data-imei');
+        if (!MapKit.canFocus(imei)) {
+          U.toast('「' + PetStore.nameOf(imei) + '」暂无定位，无法在地图上定位', 'err');
+          return;
+        }
         MapKit.setLocked(imei);
-        MapKit.focusOn(imei, 16);
+        MapKit.focusOn(imei, 18);
         U.$all('.pet-card', box).forEach(function (c) { c.classList.remove('locked'); });
         card.classList.add('locked');
       });
@@ -507,25 +553,33 @@
 
   function petEditDialog(imei) {
     var p = PetStore.get(imei) || { imei: imei, name: '' };
-    var name = promptWithDefault('设备名称：', p.name || '');
-    if (name === null) return;
-    PetStore.save({ imei: imei, name: name || '未命名设备' });
-    U.toast('已保存（云端同步中）');
-    Views.render('pets', { force: true });
-  }
-
-  function promptWithDefault(msg, def) {
-    // 简单封装 window.prompt
-    try {
-      return global.prompt(msg, def);
-    } catch (e) { return null; }
+    promptDialog({
+      title: '✏️ 设备名称',
+      label: '给设备起一个易识别的名字',
+      value: p.name || '',
+      placeholder: '例如：布丁',
+      hint: '保存后会同步到云端，换设备登录也能看到',
+      okText: '保存'
+    }, function (name) {
+      PetStore.save({ imei: imei, name: name || CFG.DEV_PLACEHOLDER_NAME });
+      U.toast('已保存（云端同步中）');
+      render('pets', { force: true });
+    });
   }
 
   function petDelete(imei) {
-    if (!global.confirm('确定删除设备 ' + imei + ' 吗？')) return;
-    PetStore.remove(imei);
-    U.toast('已删除');
-    Views.render('pets', { force: true });
+    confirmDialog({
+      title: '🗑 删除设备',
+      html: '确定删除设备 <b>' + U.esc(PetStore.nameOf(imei)) + '</b>（' + U.esc(imei) + '）吗？<br>' +
+            '<span class="mute">本地档案会被移除，云端的设备与历史数据不受影响。</span>',
+      okText: '删除',
+      danger: true
+    }, function () {
+      PetStore.remove(imei);
+      if (global.LocCache) LocCache.drop(imei);   // 本地定位缓存一并清掉，防串号复活
+      U.toast('已删除');
+      render('pets', { force: true });
+    });
   }
 
   /* ================= #/devices 设备管理 ================= */
@@ -661,6 +715,94 @@
     return wrap;
   }
 
+  /**
+   * 按路由名重新渲染当前页
+   * 原实现多处调用了未定义的 Views.render（切项目、改名、删设备后刷新），
+   * 会抛 TypeError 导致「操作成功但页面没变化」，此处补齐分发器。
+   */
+  function render(route, opts) {
+    switch (route) {
+      case 'home': renderHome(opts); break;
+      case 'pets': renderPets(opts); break;
+      case 'devices': renderDevices(opts); break;
+      case 'track': if (Views.renderTrack) Views.renderTrack(); break;
+      case 'status': if (Views.renderStatus) Views.renderStatus(); break;
+      case 'fence': if (Views.renderFence) Views.renderFence(); break;
+      case 'alerts': if (Views.renderAlerts) Views.renderAlerts(); break;
+      case 'debug': if (Views.renderDebug) Views.renderDebug(); break;
+      case 'report': if (Views.renderReport) Views.renderReport(); break;
+      default: renderHome(opts);
+    }
+  }
+
+  /**
+   * 应用内输入弹窗（替代 window.prompt）
+   * 原因：Android WebView 未覆写 WebChromeClient.onJsPrompt 时，window.prompt 会被静默丢弃并返回
+   * null —— 外部表现就是「电子围栏点了没反应」「设备改名保存不了」。改为自绘弹窗后全平台一致可用。
+   */
+  function promptDialog(opts, onOk, onCancel) {
+    opts = opts || {};
+    var settled = false;
+    var box = modal(opts.title || '请输入',
+      '<div class="form">' +
+      (opts.label ? '  <label>' + U.esc(opts.label) + '</label>' : '') +
+      '  <input id="dlg-input" type="text" value="' + U.esc(opts.value || '') + '" placeholder="' + U.esc(opts.placeholder || '') + '">' +
+      (opts.hint ? '  <div class="mute" style="margin-top:4px">' + U.esc(opts.hint) + '</div>' : '') +
+      '</div>',
+      '<button class="btn ghost" id="dlg-cancel">取消</button>' +
+      '<button class="btn" id="dlg-ok">' + U.esc(opts.okText || '确定') + '</button>');
+
+    var input = box.querySelector('#dlg-input');
+    var okBtn = box.querySelector('#dlg-ok');
+    var cancelBtn = box.querySelector('#dlg-cancel');
+
+    function finish(val, ok) {
+      if (settled) return;
+      settled = true;
+      if (box.parentNode) box.parentNode.removeChild(box);
+      if (ok) { if (onOk) onOk(val); }
+      else if (onCancel) onCancel();
+    }
+    // ✕ 与点遮罩关闭 = 取消（modal 已绑定关闭，这里补一次业务回调）
+    var x = box.querySelector('.modal-close');
+    if (x) x.addEventListener('click', function () { finish(null, false); });
+    box.addEventListener('click', function (e) { if (e.target === box) finish(null, false); });
+
+    if (okBtn) okBtn.addEventListener('click', function () { finish(input ? input.value.trim() : '', true); });
+    if (cancelBtn) cancelBtn.addEventListener('click', function () { finish(null, false); });
+    if (input) {
+      setTimeout(function () { try { input.focus(); input.select(); } catch (e) { /* ignore */ } }, 60);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); finish(input.value.trim(), true); }
+      });
+    }
+    return box;
+  }
+
+  /**
+   * 应用内确认弹窗（替代 window.confirm），html 仅可传应用内构造的可信字符串
+   */
+  function confirmDialog(opts, onOk) {
+    opts = opts || {};
+    var settled = false;
+    var box = modal(opts.title || '请确认',
+      '<div style="font-size:13.5px;line-height:1.75">' + (opts.html || U.esc(opts.text || '')) + '</div>',
+      '<button class="btn ghost" id="cf-cancel">' + U.esc(opts.cancelText || '取消') + '</button>' +
+      '<button class="btn' + (opts.danger ? ' danger' : '') + '" id="cf-ok">' + U.esc(opts.okText || '确定') + '</button>');
+
+    var okBtn = box.querySelector('#cf-ok');
+    var cancelBtn = box.querySelector('#cf-cancel');
+    function finish(ok) {
+      if (settled) return;
+      settled = true;
+      if (box.parentNode) box.parentNode.removeChild(box);
+      if (ok && onOk) onOk();
+    }
+    if (okBtn) okBtn.addEventListener('click', function () { finish(true); });
+    if (cancelBtn) cancelBtn.addEventListener('click', function () { finish(false); });
+    return box;
+  }
+
   var Views = {
     state: state,
     clearTimers: clearTimers,
@@ -668,6 +810,9 @@
     hideLoading: hideLoading,
     buildShell: buildShell,
     modal: modal,
+    promptDialog: promptDialog,
+    confirmDialog: confirmDialog,
+    render: render,
     activeNav: activeNav,
     updateAlertDot: updateAlertDot,
     renderHome: renderHome,

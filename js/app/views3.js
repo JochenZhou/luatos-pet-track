@@ -10,6 +10,9 @@
  */
 (function (global) {
   'use strict';
+  // 主题取色：地图/Canvas 画在 DOM 之外，拿不到 var()，必须显式取色。
+  // 取不到 Theme 时退回原硬编码值，保证 theme.js 未加载也不影响绘制。
+  var TH = global.Theme || { cssVar: function (n, f) { return f; } };
   var U = global.Utils;
   var CFG = global.CFG;
   var AC = global.AC;
@@ -421,10 +424,10 @@
     var padL = 30, padR = 12, padTop = 42, padBottom = 28;
     ctx.clearRect(0, 0, W, H);
     // 底色
-    ctx.fillStyle = '#f4f6fb';
+    ctx.fillStyle = '#F5F7FB';
     ctx.fillRect(0, 0, W, H);
     // 标题（独立顶部，不侵入绘图区）
-    ctx.fillStyle = '#1f2937';
+    ctx.fillStyle = '#0B1220';
     ctx.font = 'bold 16px sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText('活跃时段（上报点分布）', padL, 22);
@@ -437,14 +440,14 @@
     for (var h = 0; h < 24; h++) {
       var bh = hours[h] / max * chartH;
       if (hours[h] > 0) {
-        ctx.fillStyle = '#2f7bff';
+        ctx.fillStyle = TH.cssVar('--brand-600', '#4F46E5');
         ctx.globalAlpha = 0.35 + 0.65 * (hours[h] / max);
         ctx.fillRect(padL + h * bw + 2, chartBottom - bh, bw - 4, bh);
         ctx.globalAlpha = 1;
       }
       // 刻度（每 6 小时）
       if (h % 6 === 0) {
-        ctx.fillStyle = '#8a94a6';
+        ctx.fillStyle = '#64748B';
         ctx.font = '13px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(h + '时', padL + h * bw + bw / 2, chartBottom + 16);
@@ -475,8 +478,8 @@
         ctx.fillRect(0, 0, W, totalH);
         // 头部渐变条
         var grad = ctx.createLinearGradient(0, 0, W, topH);
-        grad.addColorStop(0, '#2f7bff');
-        grad.addColorStop(1, '#5c9dff');
+        grad.addColorStop(0, TH.cssVar('--brand-600', '#4F46E5'));
+        grad.addColorStop(1, '#06B6D4');
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, W, topH);
         ctx.fillStyle = '#fff';
@@ -492,21 +495,21 @@
         ctx.globalAlpha = 1;
         var y = topH + 16;
         // Hero 距离
-        ctx.fillStyle = '#2f7bff';
+        ctx.fillStyle = TH.cssVar('--brand-600', '#4F46E5');
         ctx.font = 'bold 64px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(fmtDist(model.distance), W / 2, y + 64);
-        ctx.fillStyle = '#8a94a6';
+        ctx.fillStyle = '#64748B';
         ctx.font = '20px sans-serif';
         ctx.fillText('今日移动距离', W / 2, y + 94);
         // 口吻总结
-        ctx.fillStyle = '#1f2937';
+        ctx.fillStyle = '#0B1220';
         ctx.font = '18px sans-serif';
         ctx.fillText(model.summary, W / 2, y + 126);
         // 趣味换算
         var funText = (model.funLines || []).join(' · ');
         if (funText) {
-          ctx.fillStyle = '#8a94a6';
+          ctx.fillStyle = '#64748B';
           ctx.font = '15px sans-serif';
           ctx.fillText(funText, W / 2, y + 152);
         }
@@ -515,7 +518,7 @@
         if (model.streak > 0) achParts.push('🔥 连续打卡 ' + model.streak + ' 天');
         achParts = achParts.concat(model.badges || []);
         if (achParts.length) {
-          ctx.fillStyle = '#e67e22';
+          ctx.fillStyle = '#F59E0B';
           ctx.font = '16px sans-serif';
           ctx.fillText(achParts.join('  '), W / 2, y + 184);
         }
@@ -536,12 +539,12 @@
         items.forEach(function (it, idx) {
           var gx = pad + (idx % 4) * gw;
           var gy = y + Math.floor(idx / 4) * gh;
-          ctx.fillStyle = '#f4f6fb';
+          ctx.fillStyle = '#F5F7FB';
           ctx.fillRect(gx + 4, gy + 4, gw - 8, gh - 8);
-          ctx.fillStyle = '#8a94a6';
+          ctx.fillStyle = '#64748B';
           ctx.font = '15px sans-serif';
           ctx.fillText(it[0], gx + 16, gy + 30);
-          ctx.fillStyle = '#1f2937';
+          ctx.fillStyle = '#0B1220';
           ctx.font = 'bold 21px sans-serif';
           ctx.fillText(it[1], gx + 16, gy + 58);
         });
@@ -550,7 +553,7 @@
         ctx.drawImage(hoursCv, 0, y, W, hoursH - 10);
         // 页脚（位置 + 活跃时长/上报/充电 + 来源）
         y = topH + heroH + gridH + hoursH;
-        ctx.fillStyle = '#8a94a6';
+        ctx.fillStyle = '#64748B';
         ctx.font = '15px sans-serif';
         var addr = model.latest && model.latest.address ? model.latest.address : '--';
         if (addr.length > 34) addr = addr.slice(0, 33) + '…';

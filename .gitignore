@@ -1,9 +1,21 @@
-# 构建产物 / 部署生成
+# 构建产物 / 部署生成（CI 里重新构建）
 index.html
 app.js
 
+# Android 构建产物
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+
 # 本地服务
 *.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
 
 # 系统
 .DS_Store

@@ -8,6 +8,9 @@
  */
 (function (global) {
   'use strict';
+  // 主题取色：地图/Canvas 画在 DOM 之外，拿不到 var()，必须显式取色。
+  // 取不到 Theme 时退回原硬编码值，保证 theme.js 未加载也不影响绘制。
+  var TH = global.Theme || { cssVar: function (n, f) { return f; } };
   var U = global.Utils;
   var CFG = global.CFG;
 
@@ -26,6 +29,35 @@
 
   function mapAlive() {
     return !!(state.map);
+  }
+
+  /* ---------------- 主题取色 ----------------
+     调用方传「CSS 变量名」而不是求值后的色值：换主题时才能就地重算样式，
+     否则形状颜色会永远停在图层创建那一刻（表现为「换了主题、地图还是旧色」）。 */
+  var TOKEN_FALLBACK = {
+    '--brand-500': '#6366F1',
+    '--brand-600': '#4F46E5',
+    '--ok': '#10B981',
+    '--danger': '#F43F5E',
+    '--warn': '#F59E0B',
+    '--info': '#3B82F6'
+  };
+  // 未显式指定颜色时的默认 token（按形状类型）
+  var TEMP_TOKEN = { dot: '--brand-600', polyline: '--brand-600', circle: '--warn', polygon: '--brand-500' };
+  var FENCE_TOKEN = { circle: '--warn', polygon: '--brand-500' };
+
+  function tokenOf(shape, table) {
+    if (shape && shape.color) return shape.color;      // 调用方显式给了（token 或色值）
+    return (table && table[shape && shape.kind]) || '--brand-600';
+  }
+
+  /** token -> 实际色值；非 token（#rrggbb 之类）原样返回 */
+  function resolve(token) {
+    if (!token) return TOKEN_FALLBACK['--brand-600'];
+    if (String(token).indexOf('--') === 0) {
+      return TH.cssVar(token, TOKEN_FALLBACK[token] || TOKEN_FALLBACK['--brand-600']);
+    }
+    return token;
   }
 
   function destroyMap() {
@@ -128,16 +160,21 @@
 
   /* ---------------- 设备 marker（MultiMarker） ---------------- */
 
+  function markerStyles() {
+    return { online: petMarkerStyle(resolve('--brand-600')), offline: petMarkerStyle('#8B96AB') };
+  }
+
   function ensureMarkerLayer() {
     if (!state.markerLayer && state.map) {
       state.markerLayer = new TMap.MultiMarker({
         map: state.map,
-        styles: { online: petMarkerStyle('#2f7bff'), offline: petMarkerStyle('#9aa3b2') },
+        styles: markerStyles(),
         geometries: []
       });
       state.markerLayer.on('click', function (e) {
         if (e.geometry && e.geometry.id) {
           state.lockedImei = e.geometry.id;
+          focusOn(e.geometry.id, 18);   // 点击地图上的设备点也放大到该设备
           openPopupFor(e.geometry.id);
         }
       });
@@ -286,21 +323,52 @@
       try { state.markerLayer.remove(hideIds); } catch (e) { /* ignore */ }
     }
     var st = m.info;
-    var zoom = follow ? 18 : 16;
-    state.map.setCenter(new TMap.LatLng(Number(st.lat), Number(st.lng)));
-    state.map.setZoom(zoom);
+    panTo(new TMap.LatLng(Number(st.lat), Number(st.lng)), follow ? 17 : 16, 600);
   }
 
   /* ---------------- 卡片 hover/click 缩放 ---------------- */
+
+  /**
+   * 平移 + 缩放（关键修复）
+   * TMap 的 setCenter 会启动一段平移动画；紧接其后的 setZoom 会被动画终点覆盖或直接丢弃，
+   * 表现就是「点击设备卡片地图不放大」。统一改用 easeTo 一次性提交 center + zoom；
+   * 无 easeTo 的旧版本退化为「先定级、再平移，并在动画结束后补一次级别」。
+   */
+  function panTo(pos, z, duration) {
+    var map = state.map;
+    if (!map) return;
+    var dur = duration === undefined ? 420 : duration;
+    if (typeof map.easeTo === 'function') {
+      try { map.easeTo({ center: pos, zoom: z, duration: dur }); return; } catch (e) { /* 落到回退分支 */ }
+    }
+    try { if (typeof map.setZoom === 'function') map.setZoom(z); } catch (e) { /* ignore */ }
+    try { map.setCenter(pos); } catch (e) { /* ignore */ }
+    setTimeout(function () {
+      if (mapAlive() && state.map === map) {
+        try { map.setZoom(z); } catch (e) { /* ignore */ }
+      }
+    }, dur + 120);
+  }
+
+  /**
+   * 设备是否有可用定位（视图层用来区分「不存在」与「无定位」两种情况）
+   */
+  function canFocus(imei) {
+    var m = state.petMarkers[imei];
+    if (!m || !m.info) return false;
+    var st = m.info;
+    return st.lng !== undefined && st.lat !== undefined && isFinite(st.lng) && isFinite(st.lat);
+  }
 
   function focusOn(imei, zoom) {
     var m = state.petMarkers[imei];
     if (!m || !m.info || !mapAlive()) return false;
     var st = m.info;
-    if (!(st.lng !== undefined && isFinite(st.lng))) return false;
-    var z = state.lockedImei === imei ? Math.max(zoom, 16) : (zoom || 15);
-    state.map.setCenter(new TMap.LatLng(Number(st.lat), Number(st.lng)));
-    state.map.setZoom(z);
+    if (!(st.lng !== undefined && st.lat !== undefined && isFinite(st.lng) && isFinite(st.lat))) return false;
+    var z = zoom || 15;
+    // 已锁定的设备保持放大，不被后续 hover 缩小
+    if (state.lockedImei === imei) z = Math.max(z, 17);
+    panTo(new TMap.LatLng(Number(st.lat), Number(st.lng)), z, 420);
     return true;
   }
 
@@ -312,28 +380,30 @@
   function addTemp(shape) {
     if (!mapAlive() || !shape) return null;
     var obj = null;
+    var token = tokenOf(shape, TEMP_TOKEN);
+    var color = resolve(token);
     if (shape.kind === 'dot') {
       obj = new TMap.MultiMarker({
         map: state.map,
-        styles: { s: dotStyle(shape.color || '#2f7bff', shape.radius || 7) },
+        styles: { s: dotStyle(color, shape.radius || 7) },
         geometries: [{ id: 'd', position: ll(shape.point), styleId: 's' }]
       });
     } else if (shape.kind === 'polyline') {
       obj = new TMap.MultiPolyline({
         map: state.map,
-        styles: { s: lineStyle(shape.color, shape.weight, shape.opacity, shape.dash) },
+        styles: { s: lineStyle(color, shape.weight, shape.opacity, shape.dash) },
         geometries: [{ id: 'l', paths: (shape.points || []).map(ll), styleId: 's' }]
       });
     } else if (shape.kind === 'circle') {
       obj = new TMap.MultiCircle({
         map: state.map,
-        styles: { s: circleStyle(shape.color, shape.fillOpacity) },
+        styles: { s: circleStyle(color, shape.fillOpacity) },
         geometries: [{ id: 'c', center: ll(shape.center), radius: shape.radius || 100, styleId: 's' }]
       });
     } else if (shape.kind === 'polygon') {
       obj = new TMap.MultiPolygon({
         map: state.map,
-        styles: { s: polygonStyle(shape.color, shape.fillOpacity) },
+        styles: { s: polygonStyle(color, shape.fillOpacity) },
         geometries: [{ id: 'p', paths: (shape.points || []).map(ll), styleId: 's' }]
       });
     }
@@ -341,6 +411,18 @@
     var handle = {
       kind: shape.kind,
       obj: obj,
+      shape: shape,
+      token: token,
+      applyStyle: function () {
+        var c = resolve(token);
+        var st = null;
+        if (shape.kind === 'dot') st = dotStyle(c, shape.radius || 7);
+        else if (shape.kind === 'polyline') st = lineStyle(c, shape.weight, shape.opacity, shape.dash);
+        else if (shape.kind === 'circle') st = circleStyle(c, shape.fillOpacity);
+        else if (shape.kind === 'polygon') st = polygonStyle(c, shape.fillOpacity);
+        if (!st) return;
+        try { obj.setStyles({ s: st }); } catch (e) { /* 个别版本无 setStyles，忽略 */ }
+      },
       move: function (point) {
         if (shape.kind === 'dot') { try { obj.updateGeometries([{ id: 'd', position: ll(point) }]); } catch (e) {} }
         else if (shape.kind === 'circle') { try { obj.updateGeometries([{ id: 'c', center: ll(point) }]); } catch (e) {} }
@@ -371,10 +453,29 @@
 
   /* ---------------- 围栏形状 ---------------- */
 
+  /**
+   * 主题变了：就地重算图层样式。
+   * 不销毁重建地图 —— 否则会闪一下、丢掉视野与选中态。
+   */
+  function applyTheme() {
+    if (!mapAlive()) return 0;
+    var n = 0;
+    if (state.markerLayer) {
+      try { state.markerLayer.setStyles(markerStyles()); n++; } catch (e) { /* ignore */ }
+    }
+    state.tempShapes.concat(state.fenceShapes).forEach(function (h) {
+      if (h && typeof h.applyStyle === 'function') { h.applyStyle(); n++; }
+    });
+    return n;
+  }
+
   function clearFences() {
     state.fenceShapes.forEach(function (rec) { try { rec.obj.setMap(null); } catch (e) {} });
     state.fenceShapes = [];
   }
+
+  /** 已保存围栏的填充透明度：明显半透明（一眼看出围栏范围），比绘制期预览更实 */
+  var FENCE_FILL = 0.25;
 
   function addFence(shape) {
     if (!mapAlive() || !shape) return null;
@@ -382,13 +483,13 @@
     if (shape.kind === 'circle') {
       obj = new TMap.MultiCircle({
         map: state.map,
-        styles: { s: circleStyle('#e67e22', 0.08) },
+        styles: { s: circleStyle(resolve(tokenOf(shape, FENCE_TOKEN)), FENCE_FILL) },
         geometries: [{ id: 'f', center: ll(shape.center), radius: shape.radius || 100, styleId: 's' }]
       });
     } else if (shape.kind === 'polygon') {
       obj = new TMap.MultiPolygon({
         map: state.map,
-        styles: { s: polygonStyle('#9b59b6', 0.08) },
+        styles: { s: polygonStyle(resolve(tokenOf(shape, FENCE_TOKEN)), FENCE_FILL) },
         geometries: [{ id: 'f', paths: (shape.points || []).map(ll), styleId: 's' }]
       });
     }
@@ -426,8 +527,8 @@
 
   function focusPoint(point, zoom) {
     if (!mapAlive() || !point) return;
-    state.map.setCenter(ll(point));
-    if (zoom) state.map.setZoom(zoom);
+    if (zoom) { panTo(ll(point), zoom, 420); return; }
+    try { state.map.setCenter(ll(point)); } catch (e) { /* ignore */ }
   }
 
   function on(evt, fn) {
@@ -470,18 +571,26 @@
     isTurbo: isTurbo,
     setTurboFocus: setTurboFocus,
     focusOn: focusOn,
+    canFocus: canFocus,
+    panTo: panTo,
     setLocked: setLocked,
     locked: locked,
     addTemp: addTemp,
     clearTemp: clearTemp,
     clearFences: clearFences,
     addFence: addFence,
+    applyTheme: applyTheme,
     fitBounds: fitBounds,
     focusPoint: focusPoint,
     on: on,
     bindDelegates: bindDelegates,
     state: state
   };
+
+  /* 换主题 → 就地重算图层样式（不销毁重建地图） */
+  if (document.addEventListener) {
+    document.addEventListener('themechange', function () { applyTheme(); });
+  }
 
   global.MapKit = MapKit;
 })(window);

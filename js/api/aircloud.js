@@ -413,49 +413,135 @@
   }
 
   /**
-   * 轨迹查询：location_history 升序 + list_by_tags(513,512,1294) 升序合并，附带 1294 精细点
+   * 轨迹查询：location_history（自动翻页）+ list_by_tags(513,512,1294)（全量）
+   *
+   * 【轨迹精细度修复】原实现有两个瓶颈：
+   *   1) location_history 只取第 1 页（最多 100 条），长时段轨迹被截断；
+   *   2) 1294 GNSS BINARY 每包内含 10 个 10B 差分样本，但只按记录取 1 个点，
+   *      10 倍精细度被丢弃 —— 折线看起来「一段一段跳」。
+   * 现改为：history 自动翻页；1294 逐包展开 10 个子样本（用该记录的 512/513 或
+   * 上一个已知位置作为差分参考），轨迹点密度提升约 10 倍。
    */
   function getTrack(clientId, start, end, opts) {
     opts = opts || {};
-    var histBody = { client_id: clientId, start: start, end: end, page: 1, size: CFG.LIST_MAX_SIZE };
-    return request('/aircloud/location_history', histBody, { tag: 'history' }).then(function (histRes) {
-      var histPoints = [];
-      if (histRes.code === 0 && histRes.value && histRes.value.records) {
-        histPoints = histRes.value.records.map(function (r) {
-          return {
-            lng: Number(r.lng), lat: Number(r.lat), wlng: Number(r.wlng), wlat: Number(r.wlat),
-            time: r.time, ts: U.parseLocalTime(r.time) ? U.parseLocalTime(r.time).getTime() : 0,
-            source: 'history', coord: CFG.COORD_GCJ02
-          };
+
+    /* --- 1) location_history 自动翻页 --- */
+    function fetchHistory() {
+      var all = [];
+      var page = 1;
+      var guard = 60;   // 安全上限，防后端 total 异常导致死循环
+      function step() {
+        if (guard-- <= 0) return Promise.resolve(all);
+        return request('/aircloud/location_history', {
+          client_id: clientId, start: start, end: end, page: page, size: CFG.LIST_MAX_SIZE
+        }, { tag: 'history' }).then(function (res) {
+          if (res.code !== 0) return all;
+          var recs = (res.value && res.value.records) || [];
+          if (!recs.length) return all;
+          all = all.concat(recs);
+          var total = Number(res.value.total) || all.length;
+          if (all.length >= total || recs.length < CFG.LIST_MAX_SIZE) return all;
+          page++;
+          return step();
         });
       }
+      return step();
+    }
+
+    function historyToPoints(recs) {
+      var out = [];
+      (recs || []).forEach(function (r) {
+        var t = r.time || r.ct;
+        var lng = Number(r.lng), lat = Number(r.lat);
+        if (!isFinite(lng) || !isFinite(lat)) return;
+        out.push({
+          lng: lng, lat: lat, wlng: Number(r.wlng), wlat: Number(r.wlat),
+          time: t, ts: U.parseLocalTime(t) ? U.parseLocalTime(t).getTime() : 0,
+          source: 'history', coord: CFG.COORD_GCJ02
+        });
+      });
+      return out;
+    }
+
+    /**
+     * 单条记录 -> 轨迹点数组（核心：展开 1294 精细子样本）
+     * @param fallbackLng/fallbackLat 该记录没有 512/513 时，用上一个已知绝对位置做差分参考
+     * 子样本时间以记录时间为基准做 1ms 递增：既保证排序稳定，又不猜测报文时间窗方向，
+     * 避免不同上报周期下时间窗重叠导致折线来回穿插。
+     */
+    function recToPoints(r, fallbackLng, fallbackLat) {
+      var rawLng = recVal(r, 512);
+      var rawLat = recVal(r, 513);
+      var okLng = (rawLng !== undefined && rawLng !== null && rawLng !== '') && isFinite(Number(rawLng));
+      var okLat = (rawLat !== undefined && rawLat !== null && rawLat !== '') && isFinite(Number(rawLat));
+      var coord = (okLng || okLat) ? CFG.COORD_GCJ02 : CFG.COORD_WGS84;
+      var refLng = okLng ? Number(rawLng) : fallbackLng;
+      var refLat = okLat ? Number(rawLat) : fallbackLat;
+      var hasRef = (refLng !== null && refLng !== undefined && isFinite(refLng)) &&
+                   (refLat !== null && refLat !== undefined && isFinite(refLat));
+
+      var ts = U.recTs(r);
+      var out = [];
+
+      // 优先展开 1294 精细点
+      var hex = recVal(r, 1294);
+      if (hasRef && typeof hex === 'string' && hex.replace(/[^0-9a-fA-F]/g, '').length >= 20) {
+        var fine = null;
+        try { fine = decodeGnss5x16(hex, refLng, refLat); } catch (e) { fine = null; }
+        if (fine && fine.length) {
+          for (var i = 0; i < fine.length; i++) {
+            var s = fine[i];
+            if (!isFinite(s.lng) || !isFinite(s.lat)) continue;
+            out.push({
+              lng: s.lng, lat: s.lat,
+              time: r.ct || r.time || '', ts: ts + i,
+              source: 'gnss', coord: CFG.COORD_GCJ02, rec: r,
+              speed: s.speed, speedKmh: s.speedKmh, course: s.course, altitude: s.altitude
+            });
+          }
+          return out;
+        }
+      }
+
+      // 退回单点
+      if (okLng && okLat) {
+        out.push({
+          lng: Number(rawLng), lat: Number(rawLat),
+          time: r.ct, ts: ts,
+          source: 'tags', coord: coord, rec: r
+        });
+      }
+      return out;
+    }
+
+    return fetchHistory().then(function (histRecs) {
+      var histPoints = historyToPoints(histRecs);
       var filter = { aks: ['ct', 'ct'], acs: ['ge', 'le'], avs: [start, end] };
       return fetchAllByTags(clientId, CFG.TRACK_TAGS, filter, {
         onProgress: opts.onProgress
       }).then(function (recs) {
-        var tagPoints = recs.filter(function (r) {
-          return (U.recTs(r) > 0) && (r.val_512 !== undefined || r['512'] !== undefined) && (r.val_513 !== undefined || r['513'] !== undefined);
-        }).map(function (r) {
-          var lng = r.val_512 !== undefined ? Number(r.val_512) : Number(r['512']);
-          var lat = r.val_513 !== undefined ? Number(r.val_513) : Number(r['513']);
-          var coord = (r.val_512 !== undefined || r.val_513 !== undefined) ? CFG.COORD_GCJ02 : CFG.COORD_WGS84;
-          return {
-            lng: lng, lat: lat,
-            time: r.ct, ts: U.recTs(r),
-            source: 'tags', coord: coord,
-            rec: r
-          };
+        var tagPoints = [];
+        var lastLng = null, lastLat = null;
+        (recs || []).forEach(function (r) {
+          if (!U.recTs(r)) return;
+          var pts = recToPoints(r, lastLng, lastLat);
+          for (var i = 0; i < pts.length; i++) {
+            tagPoints.push(pts[i]);
+            lastLng = pts[i].lng;
+            lastLat = pts[i].lat;
+          }
         });
         // 合并 + 升序去重
         var merged = histPoints.concat(tagPoints).sort(function (a, b) { return a.ts - b.ts; });
         var out = [];
         var lastKey = null;
-        merged.forEach(function (p) {
+        for (var i = 0; i < merged.length; i++) {
+          var p = merged[i];
           var key = p.lng + ',' + p.lat;
-          if (key === lastKey) return;
+          if (key === lastKey) continue;
           lastKey = key;
           out.push(p);
-        });
+        }
         return out;
       });
     });

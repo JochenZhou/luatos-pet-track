@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 与 Web 端令牌对齐：bg #F5F7FB / line #E8ECF4 -->
     <style name="Theme.App" parent="@android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">#ffffff</item>
+        <item name="android:statusBarColor">#F5F7FB</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowBackground">#f4f6fb</item>
+        <item name="android:windowBackground">#F5F7FB</item>
     </style>
 </resources>

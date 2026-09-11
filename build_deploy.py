@@ -16,8 +16,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 JS_ORDER = [
     'js/config.js',
     'js/utils.js',
+    'js/theme.js',
     'js/pet-store.js',
     'js/fence.js',
+    'js/loc-cache.js',
+    'js/push.js',
     'js/algo/wgs2gcj.js',
     'js/algo/imufilter.js',
     'js/algo/stepcount.js',

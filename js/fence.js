@@ -105,6 +105,18 @@
     return false;
   }
 
+  /**
+   * 围栏是否对某设备生效。
+   * fence.imeis 为空/缺省 = 对全部设备生效（兼容旧围栏，行为不变）；
+   * 非空 = 只对勾选的设备生效（越界巡检按此过滤，别台设备越界不报这台的围栏）。
+   */
+  function targetsImei(fence, imei) {
+    if (!fence) return false;
+    var ts = fence.imeis;
+    if (!ts || !ts.length) return true;
+    return ts.map(String).indexOf(String(imei)) >= 0;
+  }
+
   /* ---------------- 报警 ---------------- */
 
   function alerts() {
@@ -183,6 +195,7 @@
     remove: remove,
     clear: clear,
     isPointInFence: isPointInFence,
+    targetsImei: targetsImei,
     pointInCircle: pointInCircle,
     pointInPolygon: pointInPolygon,
     alerts: alerts,
