@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 侧边栏头部背景：品牌渐变（靛蓝 → 极光青），与 Web 端 Aurora Slate 设计语言一致 -->
+<!-- 侧边栏头部背景。这里只是「合宙青」默认值（与 Web 端 :root / teal 预设一致）。
+     实际颜色由 MainActivity.applyAccent() 按网页端保存的配色实时生成，
+     切配色后侧边栏头部会跟着变，不再固定成靛蓝。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <gradient
         android:angle="315"
-        android:startColor="#4338CA"
-        android:centerColor="#4F46E5"
-        android:endColor="#06B6D4" />
+        android:startColor="#0F766E"
+        android:centerColor="#0D9488"
+        android:endColor="#0EA5E9" />
 </shape>

@@ -8,6 +8,11 @@ import android.app.PendingIntent;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
+import android.graphics.Color;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -68,6 +73,36 @@ public class MainActivity extends Activity {
     private WebView webView;
     private ProgressBar progressBar;
     private DrawerLayout drawer;
+    private LinearLayout drawerHeader;
+    private TextView drawerHeaderSub;
+
+    /* ---------------- 主题配色同步（侧边栏头部跟随网页端配色） ----------------
+       原生外壳（DrawerLayout 头部、ProgressBar、菜单按下底）拿不到 WebView 里的
+       CSS 变量，必须在 Android 侧再存一份色板。这份色板与
+       js/theme.js 的 PRESETS / css/style.css 的 [data-accent="*"] 一一对应，
+       冒烟测试保证后两者一致，这里是第三份副本 —— 改配色时三处都要改。
+
+       网页端切换配色时由 theme.js 的 paint() 调 AndroidBridge.setAccent(key)；
+       APP 启动/页面加载完再从 localStorage 的 pt_accent 兜底同步一次
+       （覆盖「用户上次在网页里改过、但没触发桥调用」的情况）。          */
+    private static final String PREFS = "pettrack_theme";
+    private static final String PREF_ACCENT = "accent";
+    private static final String DEFAULT_ACCENT = "teal";
+
+    /** {key, brand-700(头部渐变起), brand-600(主色/进度条), brand-100(头部副标题), brand-50(菜单按下底), aurora-500(渐变末)} */
+    private static final String[][] ACCENTS = {
+            {"teal",    "#0F766E", "#0D9488", "#CCFBF1", "#F0FDFA", "#0EA5E9"},
+            {"indigo",  "#4338CA", "#4F46E5", "#E2E6FF", "#EEF0FF", "#06B6D4"},
+            {"ocean",   "#1D4ED8", "#2563EB", "#DBEAFE", "#EFF6FF", "#06B6D4"},
+            {"violet",  "#6D28D9", "#7C3AED", "#EDE9FE", "#F5F3FF", "#D946EF"},
+            {"emerald", "#047857", "#059669", "#D1FAE5", "#ECFDF5", "#14B8A6"},
+            {"amber",   "#B45309", "#D97706", "#FEF3C7", "#FFFBEB", "#F43F5E"},
+            {"rose",    "#BE123C", "#E11D48", "#FFE4E6", "#FFF1F2", "#F97316"},
+            {"slate",   "#334155", "#475569", "#F1F5F9", "#F8FAFC", "#3B82F6"},
+    };
+
+    /** 当前生效的菜单「按下/选中」底色，切配色时用它重建菜单项背景 */
+    private int accentSoft = 0xFFF0FDFA;
 
     /* ---------------- 报警消息推送 ---------------- */
     private static final String CHANNEL_ID = "pettrack_alarm";
@@ -90,6 +125,14 @@ public class MainActivity extends Activity {
         webView = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress);
         drawer = findViewById(R.id.drawer);
+        drawerHeader = findViewById(R.id.drawer_header);
+        drawerHeaderSub = findViewById(R.id.drawer_header_sub);
+
+        // 侧边栏头部/进度条先按「上次用的配色」上色，避免先闪一下默认靛蓝。
+        // 网页端加载完后还会用 localStorage 里的 pt_accent 再兜底同步一次。
+        applyAccent(savedAccent());
+        TextView versionView = findViewById(R.id.drawer_version);
+        if (versionView != null) versionView.setText("v" + appVersionName());
 
         createNotifyChannel();
 
@@ -269,12 +312,16 @@ public class MainActivity extends Activity {
             + "if(document.querySelector('.topbar')){clearInterval(window.__androidMenuTimer);"
             + "window.__androidMenuTimer=null;install();}},100);}return;}"
             + "if(document.getElementById('android-app-menu'))return;"
+            // 按钮配色从网页端 CSS 变量取，跟着主题/深色模式一起变
+            + "var cs=getComputedStyle(document.documentElement);"
+            + "function tok(n,fb){var v=(cs.getPropertyValue(n)||'').trim();return v||fb;}"
+            + "var brand=tok('--brand-600','#0D9488'),line=tok('--line','#E8ECF4'),card=tok('--card','#ffffff');"
             + "var b=document.createElement('button');b.type='button';"
             + "b.id='android-app-menu';b.className='android-app-menu';"
             + "b.setAttribute('aria-label','打开菜单');b.title='打开菜单';b.textContent='☰';"
             + "b.style.cssText='flex:0 0 32px;width:32px;height:32px;margin:0 10px 0 0;"
-            + "padding:0;border:1px solid #E8ECF4;border-radius:12px;background:#fff;"
-            + "color:#4F46E5;font-size:18px;line-height:30px;text-align:center;"
+            + "padding:0;border:1px solid '+line+';border-radius:12px;background:'+card+';"
+            + "color:'+brand+';font-size:18px;line-height:30px;text-align:center;"
             + "box-shadow:none;cursor:pointer;display:flex;align-items:center;"
             + "justify-content:center;';"
             + "b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();"
@@ -292,6 +339,7 @@ public class MainActivity extends Activity {
         boolean inApp = url != null && url.contains("index.html");
         if (!inApp) return;
         webView.postDelayed(() -> webView.evaluateJavascript(APP_MENU_JS, null), 80);
+        syncAccentFromWeb();
     }
 
     /**
@@ -342,6 +390,95 @@ public class MainActivity extends Activity {
         return value.replace("\\", "\\\\").replace("'", "\\'");
     }
 
+    /* ================= 主题配色 → 原生外壳 ================= */
+
+    private String savedAccent() {
+        String k = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ACCENT, DEFAULT_ACCENT);
+        return (k == null || k.length() == 0) ? DEFAULT_ACCENT : k;
+    }
+
+    /**
+     * 把配色应用到原生外壳。认不出的 key 一律回落合宙青（不抛异常：
+     * 配色是网页端决定的，Android 侧没跟上新预设时也只该退化成默认色）。
+     */
+    private void applyAccent(String key) {
+        String[] hit = null;
+        for (String[] a : ACCENTS) {
+            if (a[0].equals(key)) { hit = a; break; }
+        }
+        if (hit == null) hit = ACCENTS[0];
+
+        int deep = Color.parseColor(hit[1]);
+        int main = Color.parseColor(hit[2]);
+        int sub  = Color.parseColor(hit[3]);
+        accentSoft = Color.parseColor(hit[4]);
+        int aux  = Color.parseColor(hit[5]);
+
+        // 1) 侧边栏头部：三档品牌渐变（原为写死的靛蓝 → 极光青）
+        if (drawerHeader != null) {
+            drawerHeader.setBackground(new GradientDrawable(
+                    GradientDrawable.Orientation.TL_BR, new int[]{deep, main, aux}));
+        }
+        // 2) 头部副标题（原为写死的浅青 #CFFAF5）
+        if (drawerHeaderSub != null) drawerHeaderSub.setTextColor(sub);
+        // 3) 顶部加载进度条（原为写死的 #4F46E5）
+        if (progressBar != null) {
+            progressBar.setProgressTintList(ColorStateList.valueOf(main));
+        }
+        // 4) 菜单项按下/选中底（原为写死的 #F0FDFA）
+        applyMenuItemTint(accentSoft);
+    }
+
+    private void applyMenuItemTint(int soft) {
+        LinearLayout menuList = findViewById(R.id.menu_list);
+        if (menuList == null) return;
+        for (int i = 0; i < menuList.getChildCount(); i++) {
+            menuList.getChildAt(i).setBackground(menuItemBg(soft));
+        }
+    }
+
+    /** 菜单项背景：按下/选中 = 品牌浅底 + 12dp 圆角（对齐 Web 端 brand-50 / r-sm） */
+    private Drawable menuItemBg(int soft) {
+        StateListDrawable sl = new StateListDrawable();
+        sl.addState(new int[]{android.R.attr.state_pressed}, roundRect(soft));
+        sl.addState(new int[]{android.R.attr.state_selected}, roundRect(soft));
+        sl.addState(new int[]{}, roundRect(0x00000000));
+        return sl;
+    }
+
+    private Drawable roundRect(int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.RECTANGLE);
+        g.setColor(color);
+        g.setCornerRadius(dp(12));
+        return g;
+    }
+
+    /** 版本号直接取 build.gradle 的 versionName，免得侧边栏写死的版本号和实际包脱节 */
+    private String appVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * 从网页端 localStorage 兜底同步配色：用户可能在浏览器/网页里改过配色，
+     * 那次改动不一定触发桥调用（比如更早版本、或桥被清）。
+     */
+    private void syncAccentFromWeb() {
+        webView.evaluateJavascript(
+                "(function(){try{return localStorage.getItem('pt_accent')||'" + DEFAULT_ACCENT
+                        + "';}catch(e){return '" + DEFAULT_ACCENT + "';}})()",
+                value -> {
+                    String k = value == null ? "" : value.replace("\"", "").trim();
+                    if (k.length() == 0) k = DEFAULT_ACCENT;
+                    final String key = k;
+                    runOnUiThread(() -> applyAccent(key));
+                });
+    }
+
     /** 动态构建侧边栏菜单项 */
     private void setupDrawerMenu() {
         LinearLayout menuList = findViewById(R.id.menu_list);
@@ -354,7 +491,7 @@ public class MainActivity extends Activity {
             item.setGravity(Gravity.CENTER_VERTICAL);
             item.setSingleLine(true);
             item.setPadding(dp(20), dp(14), dp(20), dp(14));
-            item.setBackgroundResource(R.drawable.menu_item_bg);
+            item.setBackground(menuItemBg(accentSoft));   // 跟随当前配色，切色时整体重建
             // 左右留边，让 12dp 圆角背景可见（与 Web 端菜单项圆角一致）
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -371,6 +508,21 @@ public class MainActivity extends Activity {
 
     /** 保存日报图片到系统相册 */
     private class AndroidBridge {
+        /**
+         * 网页端切换配色时调用（js/theme.js 的 paint() 里）。
+         * 原生外壳拿不到 WebView 的 CSS 变量，只能靠这条通知把侧边栏头部、
+         * 进度条、菜单按下底一起换过来 —— 否则就是「Web 变了青，APP 侧栏还是靛蓝」。
+         *
+         * @param key 配色键，与 js/theme.js PRESETS 的 key 一致，如 "teal"
+         */
+        @JavascriptInterface
+        public void setAccent(String key) {
+            final String k = (key == null || key.length() == 0) ? DEFAULT_ACCENT : key;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString(PREF_ACCENT, k).apply();
+            runOnUiThread(() -> applyAccent(k));
+        }
+
         @JavascriptInterface
         public void openDrawer() {
             runOnUiThread(() -> {

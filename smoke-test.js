@@ -449,6 +449,76 @@ return AC.request('/list_my_projects', {}).then(r => {
     ok(FenceStore.targetsImei(fAll, 'anything'), 'T117 无 imeis 的旧围栏对全部设备生效（向后兼容）');
     FenceStore.remove(fT.id); FenceStore.remove(fAll.id);
 
+    /* ================= 登录页 / APP 侧边栏 跟随主题色 ================= */
+
+    // 登录页 :root 的品牌色必须与 css/style.css 的默认（合宙青）一致。
+    // 这里曾经脱节：业务页默认早换成合宙青，登录页还留着旧「极光靛蓝」，
+    // 于是就出现「登录按钮一直是蓝的」——用断言钉死，别再犯。
+    const loginText = fs.readFileSync(path.join(ROOT, 'login.html'), 'utf8');
+    const defaultRoot = cssText.match(/:root \{([\s\S]*?)\n\}/)[1];
+    const loginRootM = loginText.match(/:root \{([\s\S]*?)\n {4}\}/);
+    const loginRoot = loginRootM ? loginRootM[1] : '';
+    const pick = (text, name) => {
+      const m = text.match(new RegExp('--' + name + '\\s*:\\s*([^;]+);'));
+      return m ? m[1].trim().toUpperCase() : null;
+    };
+    const loginBad = ['brand-500', 'brand-600', 'brand-700']
+      .filter(n => pick(loginRoot, n) !== pick(defaultRoot, n));
+    ok(loginBad.length === 0 && pick(loginRoot, 'brand-600') === '#0D9488',
+      'T118 登录页品牌色与业务页默认（合宙青）一致'
+      + (loginBad.length ? ' 差异:' + loginBad.join(',') : ''));
+
+    // 登录按钮必须是业务页主按钮同一套双档渐变。
+    // 早先末端还接 --aurora-500，合宙青下末端偏天蓝，看着仍像「蓝按钮」。
+    ok(/\.btn-login \{[\s\S]*?linear-gradient\(135deg, var\(--brand-600\), var\(--brand-500\)\)/
+      .test(loginText),
+      'T119 登录按钮渐变为品牌双档 brand-600 → brand-500');
+
+    // APP 侧边栏头部/进度条由 MainActivity 的 ACCENTS 表驱动（原生拿不到 CSS 变量）。
+    // 这张表是配色的第 3 份副本，必须与 CSS 预设逐项一致，否则又会出现
+    // 「网页变了青、APP 侧栏还是靛蓝」。
+    const javaText = fs.readFileSync(path.join(ROOT,
+      'android/app/src/main/java/com/jochen/luatos_pet_track/MainActivity.java'), 'utf8');
+    const javaKeys = (javaText.match(/\{"(\w+)",\s*"#/g) || [])
+      .map(s => s.match(/"(\w+)"/)[1]);
+    ok(Theme.PRESETS.length === javaKeys.length
+      && Theme.PRESETS.every(p => javaKeys.indexOf(p.key) >= 0),
+      'T120 APP 侧边栏配色表键与 theme.js 预设一一对应 (java=' + javaKeys.length + ')');
+
+    const javaRows = (javaText.match(
+      /\{"\w+",\s*"#\w{6}",\s*"#\w{6}",\s*"#\w{6}",\s*"#\w{6}",\s*"#\w{6}"\}/g) || [])
+      .map(r => r.match(/"#\w{6}"/g).map(s => s.replace(/"/g, '').toUpperCase()));
+    const paletteBad = [];
+    Theme.PRESETS.forEach(p => {
+      const i = javaKeys.indexOf(p.key);
+      if (i < 0 || !javaRows[i]) { paletteBad.push(p.key + ':缺行'); return; }
+      const bodyM = cssText.match(new RegExp('\\[data-accent="' + p.key + '"\\] \\{([\\s\\S]*?)\\n\\}'));
+      const body = bodyM ? bodyM[1] : '';
+      // 顺序与 Java 侧数组一致：700 / 600 / 100 / 50 / aurora-500
+      ['brand-700', 'brand-600', 'brand-100', 'brand-50', 'aurora-500'].forEach((n, j) => {
+        const want = pick(body, n);
+        if (want !== javaRows[i][j]) {
+          paletteBad.push(p.key + '.' + n + '(' + javaRows[i][j] + '≠' + want + ')');
+        }
+      });
+    });
+    ok(paletteBad.length === 0,
+      'T121 APP 侧边栏配色表与 CSS 预设逐色一致'
+      + (paletteBad.length ? ' 差异:' + paletteBad.join(' ') : ''));
+
+    // 网页端切配色必须通知原生，否则侧边栏不会变
+    const themeText = fs.readFileSync(path.join(ROOT, 'js/theme.js'), 'utf8');
+    ok(themeText.indexOf('syncNativeAccent(accent())') > 0
+      && /AndroidBridge[\s\S]{0,80}setAccent/.test(themeText)
+      && themeText.indexOf('syncNativeAccent: syncNativeAccent') > 0,
+      'T122 theme.js 切换配色时通知 AndroidBridge.setAccent');
+    const layoutText = fs.readFileSync(path.join(ROOT,
+      'android/app/src/main/res/layout/activity_main.xml'), 'utf8');
+    ok(layoutText.indexOf('@+id/drawer_header') > 0
+      && javaText.indexOf('public void setAccent(String key)') > 0
+      && javaText.indexOf('applyAccent(savedAccent())') > 0,
+      'T123 侧边栏头部有 id，且桥方法/启动同步齐备');
+
     /* ================= 汇总 ================= */
     console.log('');
     console.log('======== 冒烟测试 ========');

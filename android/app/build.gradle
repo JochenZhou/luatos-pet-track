@@ -11,8 +11,8 @@ android {
         applicationId "com.jochen.luatos_pet_track"
         minSdk 24
         targetSdk 34
-        versionCode 9
-        versionName "0.4.3"
+        versionCode 10
+        versionName "0.4.4"
     }
 
     // 无签名配置：CI 产出未签名 release APK；本地可加 signingConfigs

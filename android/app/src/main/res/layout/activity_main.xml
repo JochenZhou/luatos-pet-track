@@ -34,8 +34,11 @@
         android:orientation="vertical"
         android:background="#ffffff">
 
-        <!-- 头部：品牌 logo + 名称 -->
+        <!-- 头部：品牌 logo + 名称
+             背景由 MainActivity.applyAccent() 按网页端保存的配色动态生成
+             （xml 里这份 @drawable/bg_drawer_header 只是「合宙青」默认值/预览占位） -->
         <LinearLayout
+            android:id="@+id/drawer_header"
             android:layout_width="match_parent"
             android:layout_height="172dp"
             android:orientation="vertical"
@@ -59,11 +62,12 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/drawer_header_sub"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="5dp"
                 android:text="设备定位与状态管理"
-                android:textColor="#CFFAF5"
+                android:textColor="#CCFBF1"
                 android:textSize="12.5sp" />
         </LinearLayout>
 
@@ -83,13 +87,13 @@
                 android:paddingBottom="8dp" />
         </ScrollView>
 
-        <!-- 底部版本信息 -->
+        <!-- 底部版本信息（文本由 MainActivity 按 versionName 填充，避免与 build.gradle 脱节） -->
         <TextView
+            android:id="@+id/drawer_version"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:padding="16dp"
             android:gravity="center"
-            android:text="v0.4.3"
             android:textColor="#9ca3af"
             android:textSize="12sp" />
     </LinearLayout>

@@ -68,11 +68,24 @@
     if (bg) meta.setAttribute('content', bg);
   }
 
+  /**
+   * APP 原生外壳（侧边栏头部渐变、加载进度条、菜单按下底）画在 WebView 之外，
+   * 拿不到 CSS 变量，只能把配色键显式告诉原生。
+   * 桥不存在时静默跳过（普通浏览器 / 桌面端 / 登录页）。重复调用是幂等的。
+   */
+  function syncNativeAccent(key) {
+    try {
+      var ab = global.AndroidBridge;
+      if (ab && typeof ab.setAccent === 'function') ab.setAccent(key);
+    } catch (e) { /* 桥调用失败不影响网页端主题 */ }
+  }
+
   function paint() {
     var root = document.documentElement;
     root.setAttribute('data-accent', accent());
     root.setAttribute('data-theme', mode());
     syncMetaColor();
+    syncNativeAccent(accent());
     syncPop();
     // 通知需要「就地换色」的模块（地图图层画在 DOM 之外，拿不到 var() 自动跟随）
     try {
@@ -267,6 +280,7 @@
     toggleMode: toggleMode,
     paint: paint,
     cssVar: cssVar,
+    syncNativeAccent: syncNativeAccent,
     init: init,
     mount: mount,
     open: openPop,
