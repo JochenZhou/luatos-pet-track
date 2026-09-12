@@ -659,10 +659,15 @@ return AC.request('/list_my_projects', {}).then(r => {
       && javaText.indexOf('import android.content.SharedPreferences;') > 0,
       'T129 Android 加载 URL 带版本号 + 换版本清 HTTP 缓存');
 
-    /* ================= 轨迹异常点清理（零误杀策略，第三版） =================
-       背景：第一版 120km/h 判据误杀货车高速（周总：不要过滤）；第二版完全下线，
-       GPS 漂移全显现（周总：更乱了）。第三版只删「物理不可能」和「孤立漂移点」，
-       真实车辆永远够不着阈值。 */
+    /* ================= 轨迹异常点清理（综合版 v7，2026-09-11 定稿） =================
+       历史教训：v1 速度判据误杀货车高速；v2 全下线漂移全显；v4 撤单步判罚漏删
+       跳线；v5/v6 速度上限在真实「冻结-跳变」数据上级联误删 —— 9.10 全天真机
+       数据回放：v6 把 831 点删剩 42 点、留下 13 段共 1382km 直线（周总截图的线）。
+       v7（按真实数据形态设计）：①全局坐标去重（设备会整段补传缓存位置，坐标
+       与上午完全相同，键量化 6 位小数跨源匹配）；②同秒多点取舍（同一时刻报出
+       多个相距甚远的位置，按衔接顺畅度保留一个）；③相邻同位折叠 + 折返尖刺
+       检验（出去又回来、进出至少一侧瞬移 → 删）。无任何逐点速度判罚 ——
+       沿线跳变（真实行程，瞬时可达 2900km/h）一律保留。 */
     const D_LAT = 10 / 111320;   // 向北 10m
     const D_LNG = 10 / 96486;    // 北纬 30° 向东 10m
     const mkPt = (lng, lat, i, dtPrev) =>
@@ -674,46 +679,106 @@ return AC.request('/list_my_projects', {}).then(r => {
     const walkKept = Algo.filterTrackOutliers(walkPts, {}, {});
     ok(walkKept.length === 6, 'T130 正常行走轨迹一点不删 (got ' + walkKept.length + '/6)');
 
+    // 补传副本：设备把缓存位置整段重发（坐标相同、时间不同）→ 全部去重
+    const replayPts = walkPts.slice();
+    replayPts.push({ lng: walkPts[2].lng, lat: walkPts[2].lat, ts: 2000000, dtPrev: 600 });
+    replayPts.push({ lng: Number(walkPts[3].lng.toFixed(6)), lat: Number(walkPts[3].lat.toFixed(6)), ts: 2000010, dtPrev: 10 });
+    const replayStat = {};
+    const replayKept = Algo.filterTrackOutliers(replayPts, {}, replayStat);
+    ok(replayKept.length === 6 && replayStat.dupes === 2,
+      'T130b 补传副本去重（同坐标只留首次，6 位小数量化跨源匹配） (kept=' + replayKept.length + ' dupes=' + replayStat.dupes + ')');
+
     // 货车高速：每 10s 跑 340m（≈122km/h）连续移动 —— 必须全部保留
     const truckPts = [];
     for (let i = 0; i < 8; i++) truckPts.push(mkPt(104.0 + i * 340 / 96486, 30.0, i));
     const truckStat = {};
     const truckKept = Algo.filterTrackOutliers(truckPts, {}, truckStat);
     ok(truckKept.length === 8 && truckStat.dropped === 0,
-      'T131 货车高速 122km/h 连续移动一点不删（第一版会整段误杀）');
+      'T131 货车高速 122km/h 连续移动一点不删（v1 会整段误杀）');
 
-    // 孤立漂移点：偏出 4km、下一个点又回到锚点附近 → 删
+    // 沿线跳变（冻结-跳变式真实行程）：每 10s 沿路线跳 3.4km（瞬时 1224km/h）
+    // —— v6 速度上限会级联误删整条路线，v7 必须全保留
+    const burstPts = [];
+    for (let i = 0; i < 8; i++) {
+      burstPts.push(mkPt(104.0 + i * 3400 / 96486, 30.0 + i * 800 / 111320, i));
+    }
+    const burstStat = {};
+    const burstKept = Algo.filterTrackOutliers(burstPts, {}, burstStat);
+    ok(burstKept.length === 8 && burstStat.dropped === 0,
+      'T131a 沿线跳变（10s 跳 3.4km，真实行程）一点不删（v6 会删到只剩 42 点）');
+
+    // 跳站：设备关机 10 分钟后 60km 外开机，继续前行 —— 真实换位，保留
+    const hopPts = [
+      mkPt(104.0, 30.0, 0),
+      mkPt(104.0 + 60000 / 96486, 30.0, 1, 600),
+      mkPt(104.0 + 60500 / 96486, 30.0, 2, 600)
+    ];
+    const hopStat = {};
+    const hopKept = Algo.filterTrackOutliers(hopPts, {}, hopStat);
+    ok(hopKept.length === 3 && hopStat.dropped === 0,
+      'T131f 低频真实换位（60km/10min，沿线继续）保留（数据非固定频率上报）');
+
+    // 孤立漂移：偏出 4km、下一个点又回到锚点附近，进出都是瞬移 → 删
     const driftPts = walkPts.slice();
-    driftPts.splice(3, 0, { lng: 104.0 + 4000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 10 });
+    driftPts.splice(3, 0, { lng: 104.0 + 4000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1003000, dtPrev: 10 });
     const driftStat = {};
     const driftKept = Algo.filterTrackOutliers(driftPts, {}, driftStat);
     ok(driftKept.length === 6 && driftStat.dropped === 1,
-      'T131b 孤立漂移（4km，下一点回到锚点附近）被剔除 (kept=' + driftKept.length + ' dropped=' + driftStat.dropped + ')');
+      'T131b 孤立漂移（4km 出去又弹回）被剔除 (kept=' + driftKept.length + ' dropped=' + driftStat.dropped + ')');
 
-    // 整包偏移：参考点取错连偏 5 个点 —— 新策略**保留**（宁多留不误删）
-    const bulkPts = [];
-    for (let i = 0; i < 3; i++) bulkPts.push(mkPt(104.0, 30.0 + i * D_LAT, i));
-    for (let i = 0; i < 5; i++) bulkPts.push(mkPt(104.0 + 1500 / 96486, 30.0 + (3 + i) * D_LAT, 3 + i));
-    const bulkStat = {};
-    const bulkKept = Algo.filterTrackOutliers(bulkPts, {}, bulkStat);
-    ok(bulkKept.length === 8 && bulkStat.dropped === 0,
-      'T132 整包偏移保留（零误杀：包内点相互连续，不满足孤立特征）');
+    // 带停留的垂直尖刺：偏出 7.6km 停 2 个点再原路弹回（9.10 真实形态）→ 整簇删
+    // （ts 必须按升序构造：X 在 A2(20s) 之后、A3(30s) 之前）
+    const spikePts = walkPts.slice();
+    spikePts.splice(3, 0,
+      { lng: 104.0 + 7600 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1028000, dtPrev: 8 },
+      { lng: 104.0 + 7600 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1029000, dtPrev: 1 });
+    const spikeStat = {};
+    const spikeKept = Algo.filterTrackOutliers(spikePts, {}, spikeStat);
+    ok(spikeKept.length === 6 && spikeStat.dropped === 1 && spikeStat.dupes === 1,
+      'T131d 带停留的垂直尖刺（7.6km 出去停 2 点弹回）整簇删除 (kept=' + spikeKept.length
+      + ' dropped=' + spikeStat.dropped + ' dupes=' + spikeStat.dupes + ')');
 
-    // 物理不可能：单步 40km / 700km/h 瞬移 → 删
+    // 低频真实返程：10km 外用 600s 走到、再 600s 返回途中 —— 速度 60km/h，
+    // 达不成「瞬移」门 → 折返形状也不许删（真实往返行程）。ts 与间隔一致。
+    const tripPts = [
+      { lng: 104.0, lat: 30.0, ts: 1000000, dtPrev: 0 },
+      { lng: 104.0 + 10000 / 96486, lat: 30.0, ts: 1600000, dtPrev: 600 },
+      { lng: 104.0 + 5000 / 96486, lat: 30.0, ts: 2200000, dtPrev: 600 }
+    ];
+    const tripStat = {};
+    const tripKept = Algo.filterTrackOutliers(tripPts, {}, tripStat);
+    ok(tripKept.length === 3 && tripStat.dropped === 0,
+      'T131c 低频真实返程（60km/h）一点不删（折返检验需瞬移门通过）');
+
+    // 同秒多点取舍（顺序颠倒回归）：同秒报出「离线点+在线点」，必须留下与
+    // 前后衔接顺畅的在线点（102.0335 在 P→Q 连线上），删离线点
+    const twinPts = [
+      { lng: 102.0134, lat: 38.2292, ts: 100000, dtPrev: 20 },
+      { lng: 101.9949, lat: 38.2152, ts: 124000, dtPrev: 24 },   // 离线点（先出现）
+      { lng: 102.0335, lat: 38.2237, ts: 124000, dtPrev: 0 },    // 在线点（后出现）
+      { lng: 102.0408, lat: 38.2211, ts: 183000, dtPrev: 45 }
+    ];
+    const twinStat = {};
+    const twinKept = Algo.filterTrackOutliers(twinPts, {}, twinStat);
+    ok(twinKept.length === 3 && twinStat.dropped === 1
+      && twinKept[1].lng === 102.0335,
+      'T131e 同秒多点取舍（离线点先到也不留错点） (kept=' + twinKept.length + ')');
+
+    // 瞬移：单步 40km 跳出去、下一点弹回锚点 → 折返 + 瞬移 → 删
     const physPts = walkPts.slice();
-    physPts.splice(3, 0, { lng: 104.0 + 40000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 10 });
+    physPts.splice(3, 0, { lng: 104.0 + 40000 / 96486, lat: 30.0 + 3 * D_LAT, ts: 1025000, dtPrev: 5 });
     const physStat = {};
     const physKept = Algo.filterTrackOutliers(physPts, {}, physStat);
     ok(physKept.length === 6 && physStat.dropped === 1,
-      'T132b 物理不可能瞬移（40km/10s）被删');
+      'T132b 瞬移（40km 跳出去又弹回）被删');
 
-    // 1294 包内 10 个样本：ts 只差 1ms，实际是 1s 一个 —— 必须靠 dtPrev 判定
+    // 1294 包内 10 个样本：坐标互异（差分展开）、ts 只差 1ms → 全保留
     const pktPts = [];
     for (let i = 0; i < 10; i++) {
       pktPts.push({ lng: 104.0, lat: 30.0 + i / 111320, ts: 5000 + i, dtPrev: i ? 1 : 0 });
     }
     const pktKept = Algo.filterTrackOutliers(pktPts, {}, {});
-    ok(pktKept.length === 10, 'T133 1294 包内 1ms 时间戳不被误判为瞬移 (kept=' + pktKept.length + '/10)');
+    ok(pktKept.length === 10, 'T133 1294 包内 1ms 时间戳不被误判 (kept=' + pktKept.length + '/10)');
 
     /* ================= 日报 / 回放：耗时与反馈的源码级约束 ================= */
     const v2Text = fs.readFileSync(path.join(ROOT, 'js/app/views2.js'), 'utf8');
@@ -733,12 +798,14 @@ return AC.request('/list_my_projects', {}).then(r => {
       'T138 通用进度条控制器已挂到 Views');
     ok(acText.indexOf('runPool(') > 0 && acText.indexOf('page++;') < 0,
       'T139 翻页改为并发（存在 runPool，串行 step 递归已移除）');
-    ok(acText.indexOf('Alg.filterTrackOutliers') > 0
-      && acText.indexOf('removedOutliers = 0') < 0,
-      'T140 getTrack 出口接零误杀清理（只删物理不可能+孤立漂移，货车高速不受影响）');
-    ok(algText.indexOf('vPhys') > 0 && algText.indexOf('strayMin') > 0
-      && algText.indexOf('dBack < d * 0.9') > 0,
-      'T140b 清理算法为第三版零误杀策略（物理判据 + 自适应上限 + 孤立点检验）');
+    // getTrack 出口接 v7 综合清理
+    ok(acText.indexOf('Alg.filterTrackOutliers') > 0,
+      'T140 getTrack 出口接 v7 清理（去重 + 同秒取舍 + 折返尖刺）');
+    ok(algText.indexOf('toFixed(6)') > 0 && algText.indexOf('spikeMin') > 0
+      && algText.indexOf('dupes') > 0
+      && algText.indexOf('vHard') < 0 && algText.indexOf('islandEnd') < 0
+      && algText.indexOf('dBack < stray') < 0,
+      'T140b 清理算法为 v7（坐标去重 + 折返尖刺，无逐点速度判罚/漂移岛）');
 
     return parallelChecks();
   }).then(summarize);

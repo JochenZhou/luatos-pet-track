@@ -18,7 +18,7 @@
   // 用途：登录页 ↔ 业务页跳转时带上 ?v=BUILD，逼浏览器/WebView 丢掉旧副本。
   // 合宙平台只给 HTML 加 Last-Modified、没有 Cache-Control，改完页面不换 URL
   // 用户就会一直看到缓存里的旧版（曾出现「登录按钮已改青色，用户仍看到蓝色」）。
-  var BUILD = '0.4.8';
+  var BUILD = '0.4.13';
 
   // appId 兜底常量：部署时优先从 URL /ai_app/luatos/{appId}/ 提取，取不到回退本值
   var FALLBACK_APP_ID = 'move';
