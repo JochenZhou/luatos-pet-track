@@ -49,6 +49,12 @@ jobs:
 
       - name: 设置 Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # ⚠️ Google 已从 SDK 仓库移除 legacy `tools` 包，而本 action 的默认值是
+          # `tools platform-tools` → sdkmanager 会报 "Failed to find package 'tools'"
+          # 并以 exit 1 结束（2026-09-15 踩到，表现为「设置 Android SDK」步骤失败）。
+          # 只装真实存在的包，platforms/build-tools 对齐 app/build.gradle 的 compileSdk 34。
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
       - name: 缓存 Gradle
         uses: actions/cache@v4
