@@ -80,12 +80,25 @@
     } catch (e) { /* 桥调用失败不影响网页端主题 */ }
   }
 
+  /**
+   * 明暗同样要告诉原生：侧边栏面板/菜单项/版本号画在 WebView 之外，
+   * 只同步配色不同步明暗的话，网页切深色后侧边栏还是一整块白底。
+   * 桥不存在时静默跳过。幂等。
+   */
+  function syncNativeMode(m) {
+    try {
+      var ab = global.AndroidBridge;
+      if (ab && typeof ab.setTheme === 'function') ab.setTheme(m);
+    } catch (e) { /* 桥调用失败不影响网页端主题 */ }
+  }
+
   function paint() {
     var root = document.documentElement;
     root.setAttribute('data-accent', accent());
     root.setAttribute('data-theme', mode());
     syncMetaColor();
     syncNativeAccent(accent());
+    syncNativeMode(mode());
     syncPop();
     // 通知需要「就地换色」的模块（地图图层画在 DOM 之外，拿不到 var() 自动跟随）
     try {
@@ -281,6 +294,7 @@
     paint: paint,
     cssVar: cssVar,
     syncNativeAccent: syncNativeAccent,
+    syncNativeMode: syncNativeMode,
     init: init,
     mount: mount,
     open: openPop,

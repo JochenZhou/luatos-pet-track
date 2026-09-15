@@ -1295,12 +1295,13 @@ main { min-height: calc(100vh - 58px - 49px); }
 .push-row .pr-sub { font-size: 11.5px; color: var(--faint); margin-top: 3px; line-height: 1.5; }
 .push-row .pr-side { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
-/* ============================== ㉗ 腾讯地图覆写 ============================== */
-.tmap-infowindow {
-  background: var(--card); border-radius: var(--r-lg);
-  box-shadow: var(--e4); border: 1px solid var(--line);
-  overflow: hidden;
-}
+/* ============================== ㉗ 腾讯地图覆写 ==============================
+   ⚠️ 这里**不能**写 InfoWindow（地图弹窗）的样式：腾讯地图 GL 的弹窗外框、
+   小三角、关闭按钮全是 SDK 用**内联 cssText** 画的，而且那个容器 div
+   没有任何 class（反编译 gljs v1.exp 确认：只 createElement('div') + style.cssText），
+   所以类选择器命中不了 —— 早先这里的 `.tmap-infowindow` 规则一直空转，
+   深色模式下弹窗仍是白底。
+   现在由 app/map.js 的 paintPopupChrome() 在拿到 DOM 后直接写内联样式覆盖。 */
 
 /* ============================== ㉘ 无障碍 / 动效降级 ============================== */
 @media (prefers-reduced-motion: reduce) {

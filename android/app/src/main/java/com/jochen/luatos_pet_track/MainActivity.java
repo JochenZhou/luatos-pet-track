@@ -101,7 +101,10 @@ public class MainActivity extends Activity {
        （覆盖「用户上次在网页里改过、但没触发桥调用」的情况）。          */
     private static final String PREFS = "pettrack_theme";
     private static final String PREF_ACCENT = "accent";
+    /** 明暗偏好（light|dark），与网页端 localStorage 的 pt_theme_mode 同步 */
+    private static final String PREF_MODE = "mode";
     private static final String DEFAULT_ACCENT = "teal";
+    private static final String DEFAULT_MODE = "light";
     /** 上次启动时的 APK 版本号：版本变了就清一次 WebView HTTP 缓存（见 clearStaleWebCache） */
     private static final String PREF_WEB_VER = "web_ver";
 
@@ -117,8 +120,14 @@ public class MainActivity extends Activity {
             {"slate",   "#334155", "#475569", "#F1F5F9", "#F8FAFC", "#3B82F6"},
     };
 
-    /** 当前生效的菜单「按下/选中」底色，切配色时用它重建菜单项背景 */
+    /** 当前生效的菜单「按下/选中」底色（浅色档），切配色时用它重建菜单项背景 */
     private int accentSoft = 0xFFF0FDFA;
+    /** 深色档按下底：主色约 16% 透明（浅色档的 brand-50 是接近白的淡色，深色下换成半透明主色） */
+    private int accentSoftDark = 0x2A0D9488;
+    /** 原生外壳当前是否深色：由网页端 setTheme 桥 / 启动时的本地偏好决定 */
+    private boolean darkMode = false;
+    /** 菜单项文字色：随明暗切换（深色下必须用浅字，否则黑字压在深底上看不见） */
+    private int menuTextColor = 0xFF0B1220;
 
     /* ---------------- 报警消息推送 ---------------- */
     private static final String CHANNEL_ID = "pettrack_alarm";
@@ -147,6 +156,9 @@ public class MainActivity extends Activity {
         // 侧边栏头部/进度条先按「上次用的配色」上色，避免先闪一下默认靛蓝。
         // 网页端加载完后还会用 localStorage 里的 pt_accent 再兜底同步一次。
         applyAccent(savedAccent());
+        // 明暗同样先按上次的本地偏好画一版：侧边栏在 WebView 之外，
+        // 等网页加载完再同步就会先闪一下白底
+        applyMode(savedMode());
         TextView versionView = findViewById(R.id.drawer_version);
         if (versionView != null) versionView.setText("v" + appVersionName());
 
@@ -322,32 +334,40 @@ public class MainActivity extends Activity {
     /**
      * APP 专用顶栏菜单：注入到网页自身的 .topbar，不再悬浮覆盖标题。
      * 页面脚本异步构建外壳，所以找不到顶栏时短暂重试。
+     *
+     * 配色必须**实时**从网页端 CSS 变量取：按钮是插进网页顶栏里的，
+     * 若只在注入那一刻取一次，用户在网页里切成深色后按钮会一直白着，
+     * 在深色顶栏上非常突兀。所以拆出 paint()，并订阅 themechange 重刷。
      */
     private static final String APP_MENU_JS = "(function(){"
+            + "function tok(cs,n,fb){var v=(cs.getPropertyValue(n)||'').trim();return v||fb;}"
+            + "function paint(){"
+            + "var b=document.getElementById('android-app-menu');if(!b)return;"
+            + "var cs=getComputedStyle(document.documentElement);"
+            + "var brand=tok(cs,'--brand-600','#0D9488'),line=tok(cs,'--line','#E8ECF4'),card=tok(cs,'--card','#ffffff');"
+            + "b.style.cssText='flex:0 0 32px;width:32px;height:32px;margin:0 10px 0 0;"
+            + "padding:0;border:1px solid '+line+';border-radius:12px;background:'+card+';"
+            + "color:'+brand+';font-size:18px;line-height:30px;text-align:center;"
+            + "box-shadow:none;cursor:pointer;display:flex;align-items:center;"
+            + "justify-content:center;';}"
             + "function install(){"
             + "var top=document.querySelector('.topbar');"
             + "if(!top){if(!window.__androidMenuTimer){window.__androidMenuTimer=setInterval(function(){"
             + "if(document.querySelector('.topbar')){clearInterval(window.__androidMenuTimer);"
             + "window.__androidMenuTimer=null;install();}},100);}return;}"
-            + "if(document.getElementById('android-app-menu'))return;"
-            // 按钮配色从网页端 CSS 变量取，跟着主题/深色模式一起变
-            + "var cs=getComputedStyle(document.documentElement);"
-            + "function tok(n,fb){var v=(cs.getPropertyValue(n)||'').trim();return v||fb;}"
-            + "var brand=tok('--brand-600','#0D9488'),line=tok('--line','#E8ECF4'),card=tok('--card','#ffffff');"
+            + "if(!document.getElementById('android-app-menu')){"
             + "var b=document.createElement('button');b.type='button';"
             + "b.id='android-app-menu';b.className='android-app-menu';"
             + "b.setAttribute('aria-label','打开菜单');b.title='打开菜单';b.textContent='☰';"
-            + "b.style.cssText='flex:0 0 32px;width:32px;height:32px;margin:0 10px 0 0;"
-            + "padding:0;border:1px solid '+line+';border-radius:12px;background:'+card+';"
-            + "color:'+brand+';font-size:18px;line-height:30px;text-align:center;"
-            + "box-shadow:none;cursor:pointer;display:flex;align-items:center;"
-            + "justify-content:center;';"
             + "b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();"
             + "if(window.AndroidBridge&&window.AndroidBridge.openDrawer)window.AndroidBridge.openDrawer();});"
             + "top.insertBefore(b,top.firstChild);"
             + "var brand=top.querySelector('.brand');if(brand){brand.style.minWidth='0';"
             + "brand.style.overflow='hidden';brand.style.whiteSpace='nowrap';"
-            + "brand.style.textOverflow='ellipsis';brand.style.flex='1 1 auto';}"
+            + "brand.style.textOverflow='ellipsis';brand.style.flex='1 1 auto';}}"
+            + "paint();"
+            + "if(!window.__androidMenuThemeBound){window.__androidMenuThemeBound=1;"
+            + "document.addEventListener('themechange',paint);}"
             + "}install();})();";
 
     /**
@@ -357,7 +377,7 @@ public class MainActivity extends Activity {
         boolean inApp = url != null && url.contains("index.html");
         if (!inApp) return;
         webView.postDelayed(() -> webView.evaluateJavascript(APP_MENU_JS, null), 80);
-        syncAccentFromWeb();
+        syncThemeFromWeb();
     }
 
     /**
@@ -430,6 +450,8 @@ public class MainActivity extends Activity {
         int main = Color.parseColor(hit[2]);
         int sub  = Color.parseColor(hit[3]);
         accentSoft = Color.parseColor(hit[4]);
+        // 深色档按下底：主色 16% 透明（ARGB alpha 0x2A ≈ 16%，对齐 Web 端深色 --brand-50）
+        accentSoftDark = (main & 0x00FFFFFF) | 0x2A000000;
         int aux  = Color.parseColor(hit[5]);
 
         // 1) 侧边栏头部：三档品牌渐变（原为写死的靛蓝 → 极光青）
@@ -444,7 +466,70 @@ public class MainActivity extends Activity {
             progressBar.setProgressTintList(ColorStateList.valueOf(main));
         }
         // 4) 菜单项按下/选中底（原为写死的 #F0FDFA）
-        applyMenuItemTint(accentSoft);
+        applyMenuItemTint(currentSoft());
+    }
+
+    /** 菜单按下底：浅色档用品牌 50（近白），深色档用半透明主色 */
+    private int currentSoft() { return darkMode ? accentSoftDark : accentSoft; }
+
+    /* ================= 明暗 → 原生外壳 ================= */
+
+    private String savedMode() {
+        String m = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_MODE, DEFAULT_MODE);
+        return "dark".equals(m) ? "dark" : "light";
+    }
+
+    /**
+     * 把明暗应用到原生外壳。侧边栏面板、菜单项文字、版本号、窗口背景、状态栏
+     * 都画在 WebView 之外，拿不到网页端的 CSS 变量 —— 只能靠 theme.js 的
+     * syncNativeMode() 通过桥通知；冷启动时先按上次的本地偏好画一版，
+     * 否则「网页是深色、侧边栏先闪一屏白底」。
+     *
+     * 色值与 css/style.css 的 [data-theme="dark"] 对齐（改主题色板时这里也要跟）。
+     */
+    private void applyMode(String mode) {
+        darkMode = "dark".equals(mode);
+
+        int bg    = darkMode ? 0xFF0A0E19 : 0xFFF5F7FB;   // Web --bg
+        int card  = darkMode ? 0xFF121826 : 0xFFFFFFFF;   // Web --card
+        int text  = darkMode ? 0xFFF1F5FB : 0xFF0B1220;   // Web --text / 浅色下的 ink-900
+        int faint = darkMode ? 0xFF7E8CA3 : 0xFF9CA3AF;
+
+        if (drawer != null) drawer.setBackgroundColor(bg);
+        View panel = findViewById(R.id.drawer_panel);
+        if (panel != null) panel.setBackgroundColor(card);
+        TextView ver = findViewById(R.id.drawer_version);
+        if (ver != null) ver.setTextColor(faint);
+
+        menuTextColor = text;
+        LinearLayout menuList = findViewById(R.id.menu_list);
+        if (menuList != null) {
+            for (int i = 0; i < menuList.getChildCount(); i++) {
+                View child = menuList.getChildAt(i);
+                if (child instanceof TextView) ((TextView) child).setTextColor(text);
+                child.setBackground(menuItemBg(currentSoft()));
+            }
+        }
+        // 窗口背景也要换：WebView 首帧渲染之前露出的是 themes.xml 的 windowBackground
+        // （浅色 #F5F7FB），深色模式下会闪一屏白
+        getWindow().getDecorView().setBackgroundColor(bg);
+        applyStatusBar(bg);
+    }
+
+    /**
+     * 状态栏跟随明暗：深色下必须撤掉 LIGHT_STATUS_BAR，
+     * 否则状态栏图标是深色的，压在深色状态栏上看不见。
+     */
+    @SuppressWarnings("deprecation")
+    private void applyStatusBar(int bg) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
+        getWindow().setStatusBarColor(bg);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        View decor = getWindow().getDecorView();
+        int vis = decor.getSystemUiVisibility();
+        if (darkMode) vis &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        else          vis |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        decor.setSystemUiVisibility(vis);
     }
 
     private void applyMenuItemTint(int soft) {
@@ -482,18 +567,21 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 从网页端 localStorage 兜底同步配色：用户可能在浏览器/网页里改过配色，
+     * 从网页端 localStorage 兜底同步「配色 + 明暗」：用户可能在浏览器/网页里改过，
      * 那次改动不一定触发桥调用（比如更早版本、或桥被清）。
+     * 一次取两个值，省一次 evaluateJavascript 往返。
      */
-    private void syncAccentFromWeb() {
+    private void syncThemeFromWeb() {
         webView.evaluateJavascript(
-                "(function(){try{return localStorage.getItem('pt_accent')||'" + DEFAULT_ACCENT
-                        + "';}catch(e){return '" + DEFAULT_ACCENT + "';}})()",
+                "(function(){try{return (localStorage.getItem('pt_accent')||'" + DEFAULT_ACCENT
+                        + "')+'|'+(localStorage.getItem('pt_theme_mode')||'" + DEFAULT_MODE
+                        + "');}catch(e){return '" + DEFAULT_ACCENT + "|" + DEFAULT_MODE + "';}})()",
                 value -> {
-                    String k = value == null ? "" : value.replace("\"", "").trim();
-                    if (k.length() == 0) k = DEFAULT_ACCENT;
-                    final String key = k;
-                    runOnUiThread(() -> applyAccent(key));
+                    String raw = value == null ? "" : value.replace("\"", "").trim();
+                    String[] parts = raw.split("\\|");
+                    String k = (parts.length > 0 && parts[0].length() > 0) ? parts[0] : DEFAULT_ACCENT;
+                    String m = (parts.length > 1 && "dark".equals(parts[1])) ? "dark" : "light";
+                    runOnUiThread(() -> { applyAccent(k); applyMode(m); });
                 });
     }
 
@@ -505,11 +593,11 @@ public class MainActivity extends Activity {
             TextView item = new TextView(this);
             item.setText(m[0]);
             item.setTextSize(15.5f);
-            item.setTextColor(0xFF0B1220);
+            item.setTextColor(menuTextColor);          // 随明暗切换（深色下用浅字）
             item.setGravity(Gravity.CENTER_VERTICAL);
             item.setSingleLine(true);
             item.setPadding(dp(20), dp(14), dp(20), dp(14));
-            item.setBackground(menuItemBg(accentSoft));   // 跟随当前配色，切色时整体重建
+            item.setBackground(menuItemBg(currentSoft()));   // 跟随配色/明暗，切主题时整体重建
             // 左右留边，让 12dp 圆角背景可见（与 Web 端菜单项圆角一致）
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -539,6 +627,21 @@ public class MainActivity extends Activity {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString(PREF_ACCENT, k).apply();
             runOnUiThread(() -> applyAccent(k));
+        }
+
+        /**
+         * 网页端切换明暗时调用（js/theme.js 的 paint() 里）。
+         * 侧边栏面板 / 菜单项 / 版本号 / 状态栏都画在 WebView 之外，
+         * 只同步配色不同步明暗的话，网页切深色后侧边栏还是一整块白底。
+         *
+         * @param mode "dark" | "light"，与 js/theme.js 的 MODES 一致
+         */
+        @JavascriptInterface
+        public void setTheme(String mode) {
+            final String m = "dark".equals(mode) ? "dark" : "light";
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString(PREF_MODE, m).apply();
+            runOnUiThread(() -> applyMode(m));
         }
 
         @JavascriptInterface

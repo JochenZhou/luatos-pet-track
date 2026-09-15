@@ -606,6 +606,36 @@ return AC.request('/list_my_projects', {}).then(r => {
       && javaText.indexOf('applyAccent(savedAccent())') > 0,
       'T123 侧边栏头部有 id，且桥方法/启动同步齐备');
 
+    /* ================= 深色模式适配：地图弹窗 + 原生侧边栏 =================
+       两处曾经的漏网之鱼：
+       1) 地图弹窗（TMap.InfoWindow）—— 外框/小三角是 SDK 用**内联 cssText**
+          画的，容器 div 连 class 都没有，CSS 类选择器压不住
+          （旧版 `.tmap-infowindow` 规则从来没命中过），必须拿到 DOM 后直写内联样式。
+       2) APP 侧边栏 —— 画在 WebView 之外，拿不到 CSS 变量，必须由 theme.js
+          把「明暗」也同步给原生（此前只同步了「配色」）。 */
+    const mapText = fs.readFileSync(path.join(ROOT, 'js/app/map.js'), 'utf8');
+    ok(mapText.indexOf('function paintPopupChrome') > 0
+      && mapText.indexOf('shell.style.backgroundColor = card') > 0
+      && mapText.indexOf('arrow.style.backgroundColor = card') > 0,
+      'T123b 地图弹窗外壳配色直写内联样式（SDK 内联样式 CSS 压不住）');
+    ok(/openPopupFor[\s\S]{0,600}paintPopupChrome\(\)/.test(mapText)
+      && /refreshOpenPopups[\s\S]{0,300}paintPopupChrome\(\)/.test(mapText)
+      && /function applyTheme[\s\S]{0,700}paintPopupChrome\(\)/.test(mapText),
+      'T123c 弹窗打开/刷新/换主题三处都会重刷外壳配色');
+    const cssDarkText = fs.readFileSync(path.join(ROOT, 'css/style.css'), 'utf8');
+    ok(cssDarkText.indexOf('.tmap-infowindow {') < 0,
+      'T123d css 不再保留从未命中的弹窗类规则（SDK 里没有这个类名）');
+    ok(themeText.indexOf('syncNativeMode(mode())') > 0
+      && themeText.indexOf('setTheme') > 0
+      && themeText.indexOf('syncNativeMode: syncNativeMode') > 0,
+      'T123e theme.js 切换明暗时通知 AndroidBridge.setTheme');
+    ok(javaText.indexOf('public void setTheme(String mode)') > 0
+      && javaText.indexOf('private void applyMode(String mode)') > 0
+      && javaText.indexOf('PREF_MODE') > 0
+      && javaText.indexOf('item.setTextColor(menuTextColor)') > 0
+      && javaText.indexOf('applyMode(savedMode())') > 0,
+      'T123f 原生侧边栏按明暗重着色（面板/菜单字色/状态栏）');
+
     /* ================= 设备列表增量渲染 + 请求失败保留旧数据 ================= */
     const viewsText = fs.readFileSync(path.join(ROOT, 'js/app/views.js'), 'utf8');
     const algText = fs.readFileSync(path.join(ROOT, 'js/algo/alg.js'), 'utf8');

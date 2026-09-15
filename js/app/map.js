@@ -315,6 +315,8 @@
     iw.setPosition(new TMap.LatLng(Number(st.lat), Number(st.lng)));
     iw.setContent(popupHtml(st));
     iw.open();
+    // SDK 的弹窗 DOM 要 open 之后才挂进地图容器，查不到就在下一帧补一次
+    if (!paintPopupChrome()) setTimeout(paintPopupChrome, 30);
     state.openImei = imei;
   }
 
@@ -323,8 +325,56 @@
     var m = state.petMarkers[state.openImei];
     if (m && m.info) {
       var iw = ensureInfoWindow();
-      if (iw) iw.setContent(popupHtml(m.info));
+      if (iw) {
+        iw.setContent(popupHtml(m.info));
+        paintPopupChrome();
+      }
     }
+  }
+
+  /**
+   * 弹窗外壳配色 —— **必须直接写内联样式**，CSS 选择器在这里是无效的。
+   *
+   * 腾讯地图 InfoWindow 的白底/小三角/关闭按钮全部由 SDK 用**内联 cssText** 画
+   * （反编译 gljs 源码可见）：
+   *   内容框  min-width:100px; white-space:nowrap; background-color:white;
+   *           padding:25px 10px 12px; border-radius:6px; box-shadow:0 2px 4px rgba(0,0,0,.15)
+   *   小三角  width:10px; height:10px; background-color:white; transform:rotate(45deg)
+   *   关闭钮  width:15px; height:15px; position:absolute; right:5px; top:5px
+   * 容器 div **没有 class**（只设 cssText），所以 style.css 里那条
+   * `[data-theme="dark"] .tmap-infowindow` 从未命中过 —— 深色模式下弹窗一直是白底。
+   *
+   * DOM 结构（.pp-box 是我们的内容）：
+   *   根(Od) ─┬─ 内容框(kd) ─ .pp-box
+   *           ├─ 小三角(Rd)
+   *           └─ 关闭按钮(Dd)
+   * 所以：.pp-box.parentNode = 内容框，其后兄弟依次为 小三角、关闭按钮。
+   *
+   * 用内联覆盖内联（后写的胜出），换主题时重刷即可跟随深浅色。
+   * WebView 无 :has() 也能工作 —— 不依赖任何选择器兼容性。
+   */
+  function paintPopupChrome() {
+    var box = document.querySelector('.pp-box');
+    if (!box || !box.parentNode) return false;
+    var card = TH.cssVar('--card', '#FFFFFF');
+    var line = TH.cssVar('--line', '#E8ECF4');
+    var shell = box.parentNode;                    // 内容框（SDK 画的白底）
+    shell.style.backgroundColor = card;
+    shell.style.border = '1px solid ' + line;
+    shell.style.borderRadius = TH.cssVar('--r-lg', '14px');
+    var shadow = TH.cssVar('--e4', '');
+    if (shadow) shell.style.boxShadow = shadow;
+    var arrow = shell.nextElementSibling;          // 小三角（SDK 画的白色菱形）
+    if (arrow) {
+      arrow.style.backgroundColor = card;
+      if (shadow) arrow.style.boxShadow = 'none';  // 深色下白菱形的硬阴影很脏
+    }
+    var closeBtn = arrow ? arrow.nextElementSibling : null;
+    if (closeBtn) {
+      var svg = closeBtn.querySelector('svg');
+      if (svg) svg.style.fill = TH.cssVar('--faint', '#aaa');
+    }
+    return true;
   }
 
   /* ---------------- 实时追踪 ---------------- */
@@ -561,6 +611,8 @@
     state.tempShapes.concat(state.fenceShapes).forEach(function (h) {
       if (h && typeof h.applyStyle === 'function') { h.applyStyle(); n++; }
     });
+    // 弹窗外壳是 SDK 内联画的，换主题必须跟着重刷（否则切了深色弹窗还是白底）
+    if (paintPopupChrome()) n++;
     return n;
   }
 
@@ -685,6 +737,7 @@
     popupHtml: popupHtml,
     openPopupFor: openPopupFor,
     refreshOpenPopups: refreshOpenPopups,
+    paintPopupChrome: paintPopupChrome,
     startTurbo: startTurbo,
     stopTurbo: stopTurbo,
     isTurbo: isTurbo,
